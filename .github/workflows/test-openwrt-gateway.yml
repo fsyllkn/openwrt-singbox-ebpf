@@ -102,14 +102,15 @@ jobs:
           python3 tests/test_menu_layout.py
           sh tests/test_menu_navigation.sh
           SB_TEST_BUSYBOX="$busybox_path" python3 tests/test_terminal_input.py
-      - name: Verify bootstrap with OpenWrt-style BusyBox character classes disabled
+      - name: Build and verify OpenWrt-style BusyBox compatibility
         shell: bash
         run: |
           set -euo pipefail
           # OpenWrt enables tr but defaults FEATURE_TR_CLASSES and
           # FEATURE_TR_EQUIV to n. The distribution BusyBox package usually
           # enables both and cannot reproduce this portability regression.
-          # Pin upstream BusyBox 1.36.1 and build only the bootstrap applets.
+          # CKSUM and STAT also default to n, while SHA256SUM defaults to y.
+          # Pin upstream BusyBox 1.36.1 and build the applets exercised below.
           busybox_revision=1a64f6a20aaf6ea4dbba68bbfa8cc1ab7e5c57c4
           busybox_archive="$RUNNER_TEMP/bootstrap-busybox.tar.gz"
           busybox_source="$RUNNER_TEMP/bootstrap-busybox"
@@ -126,9 +127,9 @@ jobs:
           enabled = {
               'ASH', 'ASH_OPTIMIZE_FOR_SIZE', 'ASH_PRINTF', 'ASH_TEST',
               'TR', 'READLINK', 'FEATURE_READLINK_FOLLOW',
-              'DIRNAME', 'SED', 'GREP', 'CHMOD',
+              'DIRNAME', 'SED', 'GREP', 'CHMOD', 'SHA256SUM',
           }
-          disabled = {'FEATURE_TR_CLASSES', 'FEATURE_TR_EQUIV'}
+          disabled = {'FEATURE_TR_CLASSES', 'FEATURE_TR_EQUIV', 'CKSUM', 'STAT', 'FEATURE_STAT_FORMAT'}
           lines = config.read_text().splitlines()
           for name in sorted(enabled | disabled):
               key = 'CONFIG_' + name
@@ -141,6 +142,9 @@ jobs:
           make -s -C "$busybox_source" oldconfig < <(yes '')
           grep -qx '# CONFIG_FEATURE_TR_CLASSES is not set' "$busybox_source/.config"
           grep -qx '# CONFIG_FEATURE_TR_EQUIV is not set' "$busybox_source/.config"
+          grep -qx '# CONFIG_CKSUM is not set' "$busybox_source/.config"
+          grep -qx '# CONFIG_STAT is not set' "$busybox_source/.config"
+          grep -qx 'CONFIG_SHA256SUM=y' "$busybox_source/.config"
           make -s -C "$busybox_source" -j2 busybox
           SB_TEST_BOOTSTRAP_BUSYBOX="$busybox_source/busybox" python3 tests/test_bootstrap_busybox.py
           SB_TEST_BOOTSTRAP_BUSYBOX="$busybox_source/busybox" bash tests/test_uninstall_ownership.sh
@@ -152,13 +156,13 @@ jobs:
           sh tests/test_runtime_paths.sh
           sh tests/test_menu_lan_config.sh
           sh tests/test_sbctl_config_paths.sh
-          sh tests/test_sbctl_check_cache.sh
+          SB_TEST_HASH_BUSYBOX="$RUNNER_TEMP/bootstrap-busybox/busybox" sh tests/test_sbctl_check_cache.sh
           bash tests/test_scripts_only_update.sh
       - name: Verify device portability and preserve user-defined private-network routing
         run: |
           bash tests/test_install_portability.sh
           sh tests/test_procd_capabilities.sh
-          bash tests/test_core_update_portability.sh
+          SB_TEST_HASH_BUSYBOX="$RUNNER_TEMP/bootstrap-busybox/busybox" bash tests/test_core_update_portability.sh
           bash tests/test_uninstall_ownership.sh
           bash tests/test_sbctl_portability.sh
           sh tests/test_device_helpers.sh

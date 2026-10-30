@@ -442,6 +442,14 @@ bash ./install.sh --scripts-only
 
 核心更新先下载并验证校验值，用候选核心检查现有配置后才替换；正在运行时重启失败会恢复旧二进制并尝试恢复服务。分文件模式先检查当前源文件与生成 JSON 是否一致；存在尚未应用的编辑、新模板策略或生成 JSON 缺失时，请先用当前核心执行 `sbctl preflight`，确认配置后再更新核心。候选核心验证期间也会检查源文件是否变化，避免校验一份配置却运行另一份。
 
+### 旧版提示 `cksum: command not found`
+
+这是旧脚本对 OpenWrt 可选工具的错误依赖。OpenWrt 默认启用 `sha256sum`，但未启用 `cksum` 和 `stat`。旧版在已有单文件配置时使用 `cksum` 检查更新前后配置是否变化，因此首次安装可能成功，随后更新却失败。新版统一使用 SHA-256，支持独立 `sha256sum` 和 `busybox sha256sum`；配置校验缓存也已移除这一依赖，无需额外安装 `cksum`。
+
+先更新源码，再将修复部署到实际服务目录。**只更新源码、随后直接运行旧的 `sbctl update-core`，仍会调用服务目录中的旧脚本。** 已完成安装的设备按本节“一次完成源码与脚本更新”执行，成功后重试 `sbctl update-core`。如果完整安装就在核心下载/更新阶段中断，更新源码后执行 `bash ./install.sh`，或重新进入 **5 安装与更新 → 1 安装/修复核心服务**，补齐后续服务注册；此时不能用 `--scripts-only` 代替完整安装。现有运行 JSON、配置分片和 Provider 会保留。
+
+`Configuration preparation failed; current core and service are unchanged` 表示更新在替换核心和重启服务前中止。不要为了绕过该提示删除个人配置；SHA-256 检查仍会拦截更新期间发生的配置修改。
+
 ## 8. 常用菜单和诊断
 
 | 一级菜单 | 二级功能 |
@@ -479,6 +487,8 @@ logread -e sing-box
 GitHub Actions 覆盖 shell 语法、分级菜单导航、回车确认、模拟终端退格与隐藏输入、运行路径、配置保留、UID、网关、核心更新回滚、安装卸载、下载代理及独立引导流程；分文件与特色路由测试覆盖无损迁移、分组引用、增删改及排序、事务回滚、缓存失效、并发编辑和停止保护。在 CI Linux 上解析并加载/移除实际生成的 nft 规则，公开配置还有结构化脱敏检查。
 
 引导路径测试还会编译关闭 `FEATURE_TR_CLASSES` / `FEATURE_TR_EQUIV` 的 BusyBox，使用其真实 ash 和工具验证普通目录、中文/空格目录、控制字符拒绝与启动器清理，避免只在 GNU 工具环境下通过测试。
+
+同一 BusyBox 构建启用 `SHA256SUM`，明确关闭 `CKSUM` 和 `STAT`。核心更新和配置缓存测试使用不含 `cksum` 的独立命令目录，验证独立 SHA-256 工具及真实 BusyBox applet 两种方式，并检查同大小/同修改时间的配置编辑、摘要失败或无效输出不会绕过更新保护或误用缓存。
 
 除了对完整 JSON 执行真实核心 `check`，CI 还使用同一固定核心验证分文件初始化、节点编辑、私网路由和丢失输出重建。另一个只有 loopback 的独立 network namespace 会真正启动核心：验证本地样例加载、selector 节点选择、HTTP 片段从本地模拟订阅获取节点及缓存重启。Provider 启动测试保留公开配置的 Provider/selector 结构，移除了与其无关的 eBPF、远程规则集和 WebUI 下载，不向虚拟订阅地址发请求。
 

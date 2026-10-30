@@ -86,14 +86,20 @@ HASH_arm64_glibc="4affe1df3ec83beb251dadf234cbed74e0d03d2c2683f6cfe4233d0893f7b8
 HASH_arm64_musl="6840a1c1ec3d924bf6620126a2736a89098bf562c50eccd2c2de577dc8a75e1c"
 
 calc_sha256() {
-    local target="$1"
+    local target="$1" sum_line digest
+    # OpenWrt enables SHA256SUM by default, but not CKSUM. Use the same
+    # supported hash for release verification and configuration fingerprints.
+    # Read stdin so filename escaping never becomes part of the digest.
     if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$target" | awk '{print $1}'
-    elif command -v busybox >/dev/null 2>&1 && busybox sha256sum "$target" >/dev/null 2>&1; then
-        busybox sha256sum "$target" | awk '{print $1}'
+        sum_line=$(sha256sum < "$target") || return 1
+    elif command -v busybox >/dev/null 2>&1; then
+        sum_line=$(busybox sha256sum < "$target") || return 1
     else
         return 1
     fi
+    digest=${sum_line%% *}
+    [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+    printf '%s\n' "$digest"
 }
 
 release_hash() {
@@ -172,7 +178,10 @@ stage_update_config() {
             err "Existing configuration is not a readable file: $SH_SINGBOX_CONFIG"
             return 1
         }
-        UPDATE_CONFIG_FINGERPRINT=$(cksum < "$SH_SINGBOX_CONFIG") || return 1
+        UPDATE_CONFIG_FINGERPRINT=$(calc_sha256 "$SH_SINGBOX_CONFIG") || {
+            err "Cannot fingerprint the existing configuration with SHA-256; sha256sum or the BusyBox sha256sum applet must be available and able to read the file."
+            return 1
+        }
     else
         UPDATE_CONFIG_MODE=fresh
         UPDATE_CONFIG=
@@ -192,7 +201,10 @@ verify_update_config_unchanged() {
             [ "$current" = "$UPDATE_CONFIG_FINGERPRINT" ] ;;
         legacy)
             ! sb_parts_active && [ -f "$SH_SINGBOX_CONFIG" ] || return 1
-            current=$(cksum < "$SH_SINGBOX_CONFIG") || return 1
+            current=$(calc_sha256 "$SH_SINGBOX_CONFIG") || {
+                err "Cannot recheck the configuration SHA-256; refusing to replace the current core."
+                return 1
+            }
             [ "$current" = "$UPDATE_CONFIG_FINGERPRINT" ] ;;
         fresh)
             ! sb_parts_active && [ ! -e "$SH_SINGBOX_CONFIG" ] && [ ! -L "$SH_SINGBOX_CONFIG" ] ;;
@@ -238,7 +250,7 @@ do_update() {
     ok "Downloaded successfully: $archive"
 
     # Hashes are bound to the selected release, not reused across versions.
-    actual_hash="$(calc_sha256 "$archive")" || die "Cannot compute SHA256; install sha256sum before updating the core"
+    actual_hash="$(calc_sha256 "$archive")" || die "Cannot compute SHA-256; sha256sum or the BusyBox sha256sum applet must be available and able to read the archive"
     [ "$actual_hash" = "$expected_hash" ] || die "SHA256 checksum mismatch; existing core is unchanged"
     ok "SHA256 verified: $actual_hash"
 

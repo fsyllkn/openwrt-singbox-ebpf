@@ -5,6 +5,7 @@ BASE=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 TEST_DIR=$(mktemp -d /tmp/sb-core-update.XXXXXX)
 trap 'rm -rf "$TEST_DIR"' EXIT HUP INT TERM
 REAL_SHA=$(command -v sha256sum)
+REAL_BASH=$(command -v bash)
 export REAL_SHA
 mkdir -p "$TEST_DIR/tools" "$TEST_DIR/archive"
 cat > "$TEST_DIR/archive/sing-box" <<'SH'
@@ -17,6 +18,14 @@ case "$1" in
         cp "$3" "$TEST_CHECK_CONFIG_CAPTURE"
         if [ "${MOCK_EDIT_PARTS_DURING_CHECK:-0}" -eq 1 ]; then
             printf '\n' >> "${SH_SINGBOX_CONFIG%.json}.d/inbounds.json"
+        fi
+        if [ "${MOCK_EDIT_CONFIG_DURING_CHECK:-0}" -eq 1 ]; then
+            sed 's/10\.8\.0\.104/10.8.0.105/' "$SH_SINGBOX_CONFIG" > "$SH_SINGBOX_CONFIG.edit"
+            touch -r "$SH_SINGBOX_CONFIG" "$SH_SINGBOX_CONFIG.edit"
+            mv "$SH_SINGBOX_CONFIG.edit" "$SH_SINGBOX_CONFIG"
+        fi
+        if [ "${MOCK_HASH_FAIL_AFTER_CHECK:-0}" -eq 1 ]; then
+            : > "$TEST_HASH_FAILURE_MARKER"
         fi
         exit "${MOCK_CONFIG_STATUS:-0}" ;;
     *) exit 66 ;;
@@ -76,12 +85,32 @@ esac
 SH
 cat > "$TEST_DIR/tools/sha256sum" <<'SH'
 #!/bin/sh
-case "${MOCK_HASH:-real}" in
-    missing) exit 127 ;;
-    mismatch) printf '%064d  %s\n' 0 "$1" ;;
-    pinned) printf '7179981f14c225e3e872ac60af2086d6d719b4ddfd901c115c86cd9e4581f4fb  %s\n' "$1" ;;
-    real) exec "$REAL_SHA" "$@" ;;
-    *) exit 66 ;;
+if [ -n "${TEST_REAL_HASH_BUSYBOX:-}" ]; then
+    output=$("$TEST_REAL_HASH_BUSYBOX" sha256sum "$@") || exit "$?"
+else
+    output=$("$REAL_SHA" "$@") || exit "$?"
+fi
+# Only the fake release archive needs a synthetic pinned digest. Configuration
+# fingerprints always hash actual contents, including when passed over stdin.
+case "$output" in
+    "$TEST_DIGEST "*)
+        case "${MOCK_HASH:-real}" in
+            missing) exit 127 ;;
+            mismatch) printf '%064d  -\n' 0 ;;
+            pinned) printf '7179981f14c225e3e872ac60af2086d6d719b4ddfd901c115c86cd9e4581f4fb  -\n' ;;
+            real) printf '%s\n' "$output" ;;
+            *) exit 66 ;;
+        esac ;;
+    *)
+        [ ! -e "${TEST_HASH_FAILURE_MARKER:-/nonexistent}" ] || exit 74
+        case "${MOCK_CONFIG_HASH:-real}" in
+            fail) exit 74 ;;
+            empty) exit 0 ;;
+            malformed) printf 'not-a-sha256-digest\n' ;;
+            failed_output) printf '%s\n' "$output"; exit 74 ;;
+            real) printf '%s\n' "$output" ;;
+            *) exit 66 ;;
+        esac ;;
 esac
 SH
 cat > "$TEST_DIR/tools/systemctl" <<'SH'
@@ -95,6 +124,52 @@ chmod 0755 "$TEST_DIR/tools/"*
 PATH=$TEST_DIR/tools:$PATH
 export PATH
 fail() { printf 'FAILED: %s\n' "$*" >&2; exit 1; }
+
+# Use an allowlist for the missing-command regression: a failing cksum wrapper
+# would still make command -v succeed and inherited /usr/bin would hide the bug.
+NO_CKSUM_PATH=$TEST_DIR/no-cksum
+APPLET_HASH_PATH=$TEST_DIR/applet-hash
+NO_HASH_PATH=$TEST_DIR/no-hash
+for tool_path in "$NO_CKSUM_PATH" "$APPLET_HASH_PATH" "$NO_HASH_PATH"; do
+    mkdir -p "$tool_path"
+    for tool in awk bash chmod cp curl dirname find grep gzip head id jq ldd \
+        mkdir mktemp mv readlink rm sed systemctl tar timeout touch tr uname; do
+        ln -s "$(command -v "$tool")" "$tool_path/$tool"
+    done
+done
+ln -s "$TEST_DIR/tools/sha256sum" "$NO_CKSUM_PATH/sha256sum"
+cat > "$APPLET_HASH_PATH/busybox" <<'SH'
+#!/bin/sh
+# Use the real feature-limited BusyBox in CI; local runs without that binary
+# still dispatch to a real SHA-256 implementation rather than a fixed digest.
+[ "$1" = sha256sum ] || exit 127
+shift
+TEST_REAL_HASH_BUSYBOX=${SB_TEST_HASH_BUSYBOX:-}
+export TEST_REAL_HASH_BUSYBOX
+exec "$TEST_SHA_WRAPPER" "$@"
+SH
+chmod 0755 "$APPLET_HASH_PATH/busybox"
+TEST_SHA_WRAPPER=$TEST_DIR/tools/sha256sum
+export TEST_SHA_WRAPPER
+if [ -n "${SB_TEST_HASH_BUSYBOX:-}" ]; then
+    [ -x "$SB_TEST_HASH_BUSYBOX" ] || fail 'SB_TEST_HASH_BUSYBOX is not executable'
+    "$SB_TEST_HASH_BUSYBOX" sha256sum </dev/null >/dev/null || fail 'test BusyBox lacks SHA-256'
+    if "$SB_TEST_HASH_BUSYBOX" cksum </dev/null >/dev/null 2>&1; then
+        fail 'test BusyBox unexpectedly includes cksum'
+    fi
+fi
+for tool_path in "$NO_CKSUM_PATH" "$APPLET_HASH_PATH" "$NO_HASH_PATH"; do
+    if PATH=$tool_path "$REAL_BASH" -c 'command -v cksum'; then
+        fail 'missing-cksum fixture exposes the host checksum command'
+    fi
+done
+if PATH=$APPLET_HASH_PATH "$REAL_BASH" -c 'command -v sha256sum'; then
+    fail 'applet-only fixture exposes standalone sha256sum'
+fi
+if PATH=$NO_HASH_PATH "$REAL_BASH" -c 'command -v sha256sum || command -v busybox'; then
+    fail 'missing-hash fixture exposes a hash implementation'
+fi
+
 prepare() {
     CASE_DIR=$TEST_DIR/$1
     SH_SINGBOX_HOME=$CASE_DIR/home
@@ -103,9 +178,10 @@ prepare() {
     TEST_DOWNLOAD_ARGS=$CASE_DIR/download-args
     TEST_DOWNLOAD_ENV=$CASE_DIR/download-env
     TEST_CHECK_CONFIG_CAPTURE=$CASE_DIR/checked-config.json
+    TEST_HASH_FAILURE_MARKER=$CASE_DIR/hash-failed-after-check
     TEST_ASSET=sing-box-1.15.0-alpha.99-reF1nd-linux-amd64-musl.tar.gz
     SB_DOWNLOAD_MODE=direct
-    export SH_SINGBOX_HOME SH_SINGBOX_CONFIG TEST_EVENTS TEST_ASSET TEST_DOWNLOAD_ARGS TEST_DOWNLOAD_ENV TEST_CHECK_CONFIG_CAPTURE SB_DOWNLOAD_MODE
+    export SH_SINGBOX_HOME SH_SINGBOX_CONFIG TEST_EVENTS TEST_ASSET TEST_DOWNLOAD_ARGS TEST_DOWNLOAD_ENV TEST_CHECK_CONFIG_CAPTURE TEST_HASH_FAILURE_MARKER SB_DOWNLOAD_MODE
     mkdir -p "$SH_SINGBOX_HOME/bin" "$SH_SINGBOX_HOME/scripts"
     cat > "$SH_SINGBOX_HOME/bin/sing-box" <<'SH'
 #!/bin/sh
@@ -169,6 +245,64 @@ assert_parts_unchanged() {
     cmp "$CASE_DIR/original.json" "$SH_SINGBOX_CONFIG" || fail 'updater modified generated runtime JSON'
     ! grep -q '^unexpected-parts:' "$TEST_EVENTS" || fail 'updater attempted to render or commit configuration'
 }
+
+for hash_backend in standalone applet; do
+    case "$hash_backend" in
+        standalone) tool_path=$NO_CKSUM_PATH ;;
+        applet) tool_path=$APPLET_HASH_PATH ;;
+    esac
+    prepare "without-cksum-$hash_backend"
+    if ! PATH=$tool_path MOCK_STOPPED=0 "$REAL_BASH" "$BASE/scripts/update-core.sh" \
+        1.15.0-alpha.99-reF1nd > "$CASE_DIR/out" 2>&1; then
+        cat "$CASE_DIR/out" >&2; fail "$hash_backend SHA-256 update requires unavailable cksum"
+    fi
+    "$SH_SINGBOX_HOME/bin/sing-box" version | grep -Fq NEW-test-core || fail 'cksum-free update did not install the candidate'
+    cmp "$CASE_DIR/original.json" "$SH_SINGBOX_CONFIG" || fail 'cksum-free update modified private configuration'
+    [ "$(grep -c '^restart:' "$TEST_EVENTS")" -eq 1 ] || fail 'running service was not restarted exactly once'
+    grep -Fq 'restart:sing-box version NEW-test-core' "$TEST_EVENTS" || fail 'running service did not receive the new core'
+
+    prepare "without-cksum-concurrent-edit-$hash_backend"
+    if PATH=$tool_path MOCK_STOPPED=0 MOCK_EDIT_CONFIG_DURING_CHECK=1 \
+        "$REAL_BASH" "$BASE/scripts/update-core.sh" 1.15.0-alpha.99-reF1nd > "$CASE_DIR/out" 2>&1; then
+        fail 'same-size configuration edit during validation was ignored'
+    fi
+    cmp "$CASE_DIR/old-core" "$SH_SINGBOX_HOME/bin/sing-box" || fail 'concurrent legacy edit replaced the old core'
+    sed 's/10\.8\.0\.104/10.8.0.105/' "$CASE_DIR/original.json" > "$CASE_DIR/edited.json"
+    cmp "$CASE_DIR/edited.json" "$SH_SINGBOX_CONFIG" || fail 'concurrent user edit was lost'
+    [ "$(wc -c < "$CASE_DIR/original.json")" -eq "$(wc -c < "$SH_SINGBOX_CONFIG")" ] || fail 'edit fixture changed config length'
+    grep -Fq 'changed during core validation' "$CASE_DIR/out" || fail 'same-size edit did not reach the content fingerprint guard'
+    ! grep -q '^restart:' "$TEST_EVENTS" || fail 'concurrent edit restarted a running service'
+done
+
+prepare no_hash_implementation
+if PATH=$NO_HASH_PATH MOCK_STOPPED=0 "$REAL_BASH" "$BASE/scripts/update-core.sh" \
+    1.15.0-alpha.99-reF1nd > "$CASE_DIR/out" 2>&1; then
+    fail 'update without a hash implementation succeeded'
+fi
+assert_old
+[ ! -e "$TEST_EVENTS" ] || fail 'missing hash implementation reached download or service actions'
+grep -Eiq 'SHA-?256' "$CASE_DIR/out" || fail 'missing hash implementation lacks a useful diagnostic'
+
+for hash_failure in fail empty malformed failed_output; do
+    prepare "config-hash-$hash_failure"
+    if PATH=$NO_CKSUM_PATH MOCK_STOPPED=0 MOCK_CONFIG_HASH=$hash_failure \
+        "$REAL_BASH" "$BASE/scripts/update-core.sh" 1.15.0-alpha.99-reF1nd > "$CASE_DIR/out" 2>&1; then
+        fail "$hash_failure configuration hash was accepted"
+    fi
+    assert_old
+    [ ! -e "$TEST_EVENTS" ] || fail 'invalid configuration hash reached download or service actions'
+done
+
+prepare config_hash_recheck_failure
+if PATH=$NO_CKSUM_PATH MOCK_STOPPED=0 MOCK_HASH_FAIL_AFTER_CHECK=1 \
+    "$REAL_BASH" "$BASE/scripts/update-core.sh" 1.15.0-alpha.99-reF1nd > "$CASE_DIR/out" 2>&1; then
+    fail 'configuration hash failure during recheck was ignored'
+fi
+assert_old
+grep -q '^check:' "$TEST_EVENTS" || fail 'recheck hash failure did not occur after candidate validation'
+! grep -q '^restart:' "$TEST_EVENTS" || fail 'recheck hash failure restarted a running service'
+echo 'No-cksum updates, real content fingerprints and fail-closed hash checks passed.'
+if [ "${SB_TEST_CORE_HASH_ONLY:-0}" -eq 1 ]; then exit 0; fi
 
 prepare custom_release
 bash "$BASE/scripts/update-core.sh" 1.15.0-alpha.99-reF1nd > "$CASE_DIR/out" 2>&1 || { cat "$CASE_DIR/out" >&2; fail 'custom release update failed'; }
