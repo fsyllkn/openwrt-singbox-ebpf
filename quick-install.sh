@@ -383,6 +383,8 @@ validate_source() {
     [ -f "$1/scripts/runtime-paths.sh" ] &&
     [ -f "$1/scripts/download.sh" ] &&
     [ -f "$1/scripts/configure-download.sh" ] &&
+    [ -f "$1/scripts/config-parts-lib.sh" ] &&
+    [ -f "$1/scripts/config-parts.sh" ] &&
     [ -f "$1/scripts/gateway.sh" ] &&
     [ -f "$1/scripts/dns-guard.sh" ] &&
     [ -f "$1/scripts/update-core.sh" ] &&

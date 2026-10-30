@@ -7,18 +7,20 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
+Environment="SH_SINGBOX_HOME=/opt/sing-box" "SH_SINGBOX_CONFIG=/opt/sing-box/config/config.json"
 
 # cgroup v2: eBPF cgroup data plane requires Delegate so sing-box can
 # manage its own cgroup subtree for self-bypass.
 Slice=sing-box.slice
 Delegate=yes
 
-ExecStartPre=/opt/sing-box/scripts/sbctl check
-ExecStartPre=/opt/sing-box/scripts/dns-guard.sh setup
-ExecStartPre=/opt/sing-box/scripts/gateway.sh apply
-ExecStart=/opt/sing-box/bin/sing-box run -c /opt/sing-box/config/config.json -D /opt/sing-box
-ExecStopPost=/opt/sing-box/scripts/gateway.sh cleanup
-ExecStopPost=/opt/sing-box/scripts/dns-guard.sh restore
+ExecStartPre="/opt/sing-box/scripts/sbctl" preflight
+ExecStartPre="/opt/sing-box/scripts/dns-guard.sh" setup
+ExecStartPre="/opt/sing-box/scripts/gateway.sh" apply
+ExecStart="/opt/sing-box/bin/sing-box" run -c "/opt/sing-box/config/config.json" -D "/opt/sing-box"
+ExecStopPost="/opt/sing-box/scripts/gateway.sh" cleanup
+ExecStopPost="/opt/sing-box/scripts/dns-guard.sh" restore
+ExecReload="/opt/sing-box/scripts/sbctl" preflight
 ExecReload=/bin/kill -HUP $MAINPID
 
 # Automatic crash recovery replaces the Android watcher.sh polling loop.

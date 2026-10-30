@@ -33,6 +33,8 @@
 ]
 ```
 
+分片模式把以上 Provider 定义保存到配置旁的 `config.d/providers.json`，格式样例见 [config-providers.sample.json](../examples/config-providers.sample.json)。这里的定义文件与节点内容文件用途不同：定义中写 `type`、`tag`、`path` 或订阅 URL；`providers/xboard.json`、`providers/local.json` 中写实际节点的 `outbounds` 数组。默认 `config.d/outbounds.json` 中的 `proxy` 选择器引用这些 Provider。
+
 路径相对于服务运行目录，不是相对于配置 JSON 所在目录。通过本项目的 `sbctl` 或服务管理器运行时，两者会使用同一服务目录。把完整示例导入旧安装前，也需要准备相应的运行文件。
 
 本地 Provider 文件必须存在且含至少一个内核支持的节点；`{"outbounds": []}` 会导致启动时报告 `no servers found`。样例关闭了节点健康检查，不会自动探测占位节点。服务能否启动还取决于设备的 BPF 支持、监听端口和规则集等条件，JSON 语法通过不等于设备运行成功。
@@ -45,7 +47,7 @@
 
 见 [HTTP 订阅片段](../examples/http-provider.sample.json)。这是合并到完整配置中的片段，不是独立运行配置，也不会被默认配置自动加载。
 
-先将虚构 URL 换成自己的实际订阅，再用该片段替换运行配置中 `tag: "xboard"` 的本地 Provider；保留 `local` 以及其他个人 Provider。同一标签只能有一条定义，不能把同标签的本地与远程 Provider 一起追加。
+先将虚构 URL 换成自己的实际订阅，再用该片段替换 `providers.json` 分片（或旧版完整配置）中 `tag: "xboard"` 的本地 Provider；保留 `local` 以及其他个人 Provider。同一标签只能有一条定义，不能把同标签的本地与远程 Provider 一起追加。
 
 远程 Provider 的 `path: "providers/xboard.json"` 是可写入的下载缓存，成功更新后内容会被订阅替换。首次启动如果没有有效缓存，核心会同步请求 URL，失败可能阻止启动。已有缓存也可能因过期或 URL 变化触发请求；`update_interval: "24h"` 和 `health_check.enabled: false` 都不表示禁用订阅刷新。
 

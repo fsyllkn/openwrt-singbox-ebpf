@@ -17,6 +17,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$REPO_ROOT/scripts/runtime-paths.sh"
 sb_load_paths || exit 1
 . "$REPO_ROOT/scripts/download.sh"
+. "$REPO_ROOT/scripts/config-parts-lib.sh"
 INSTALL_DIR="$SH_SINGBOX_HOME"
 CONFIG="$SH_SINGBOX_CONFIG"
 SCRIPTS_ONLY=0
@@ -89,6 +90,10 @@ deploy_provider_samples() {
 create_default_config() {
     # Render machine-dependent paths only for a fresh installation. Existing
     # user inbounds, private-IP routes, providers and credentials stay intact.
+    # An absent generated output never makes an existing parts layout fresh.
+    if SH_SINGBOX_CONFIG="$CONFIG" sb_parts_active; then
+        return 0
+    fi
     if [ -e "$CONFIG" ] || [ -L "$CONFIG" ]; then
         [ -f "$CONFIG" ] && [ -r "$CONFIG" ] || die "Existing configuration is not a readable file; refusing to replace it: $CONFIG"
         return 0
@@ -120,6 +125,60 @@ create_default_config() {
     info "Example nodes do not provide a working proxy; configure and select real nodes before use."
 }
 
+initialize_configuration() {
+    local parts_tool
+    if SH_SINGBOX_CONFIG="$CONFIG" sb_parts_active; then
+        info "Preserved existing configuration sources: $(SH_SINGBOX_CONFIG="$CONFIG" sb_parts_dir)"
+        return 0
+    fi
+    if [ -e "$CONFIG" ] || [ -L "$CONFIG" ]; then
+        create_default_config
+        info "Preserved existing single-file configuration: $CONFIG"
+        info "Use 'sbctl split-config' for an explicit, lossless migration."
+        return 0
+    fi
+    create_default_config
+    parts_tool=${SB_CONFIG_PARTS_TOOL:-$INSTALL_DIR/scripts/config-parts.sh}
+    [ -x "$parts_tool" ] || die "Missing configuration-parts tool: $parts_tool; update the installed scripts before continuing"
+    SH_SINGBOX_HOME="$INSTALL_DIR" SH_SINGBOX_CONFIG="$CONFIG" "$parts_tool" init ||
+        die "Initial configuration could not be split; the full JSON and providers were preserved. Resolve the validation error, then run 'sbctl split-config'."
+    info "Editable configuration sources: $(SH_SINGBOX_CONFIG="$CONFIG" sb_parts_dir)"
+}
+
+prepare_existing_parts() {
+    SH_SINGBOX_CONFIG="$CONFIG" sb_parts_active || return 0
+    [ -x "$INSTALL_DIR/bin/sing-box" ] ||
+        die "Existing configuration sources require an installed core for validation; restore that core before running a full installation"
+    info "Validating existing configuration sources with the current core before updating it..."
+    SH_SINGBOX_HOME="$INSTALL_DIR" SH_SINGBOX_CONFIG="$CONFIG" "$INSTALL_DIR/scripts/sbctl" preflight ||
+        die "Existing configuration sources could not be prepared with the current core. Resolve the draft/validation error before updating; the core and current service were not changed."
+}
+
+# Every systemd process, including reload/check/cleanup helpers, must resolve
+# the same custom HOME and CONFIG as the core. Quote paths and disable systemd
+# specifier/environment expansion of literal path characters.
+render_systemd_service() {
+    local output="$1"
+    case "$INSTALL_DIR$CONFIG" in
+        *$'\n'*|*$'\r'*) die "Systemd service paths must not contain line breaks" ;;
+    esac
+    jq -nr --arg home "$INSTALL_DIR" --arg config "$CONFIG" \
+        --rawfile unit "$INSTALL_DIR/systemd/sing-box.service" '
+      def escaped: gsub("\\\\"; "\\\\") | gsub("\""; "\\\"") | gsub("%"; "%%");
+      ($home | escaped) as $home_path | ($config | escaped) as $config_path |
+      $unit | split("\n") | map(
+        if startswith("WorkingDirectory=") then
+          "WorkingDirectory=" + ($home | gsub("%"; "%%"))
+        else
+        startswith("Exec") as $command |
+        gsub("(?<path>/opt/sing-box/config/config[.]json|/opt/sing-box)";
+          (if .path == "/opt/sing-box/config/config.json" then $config_path else $home_path end) |
+          if $command then gsub("\\$"; "$$") else . end)
+        end
+      ) | join("\n")
+    ' > "$output" || die "Cannot render systemd service for the selected runtime paths"
+}
+
 check_service_conflicts() {
     local init_path="${1:-/etc/init.d/sing-box}" first_cli="${2:-/usr/bin/sbctl}" second_cli="${3:-/usr/local/bin/sbctl}" path
     if [ -e "$init_path" ] || [ -L "$init_path" ]; then
@@ -140,10 +199,11 @@ check_service_conflicts() {
 deploy_scripts_only() {
     local init_path="${1:-/etc/init.d/sing-box}" backup file dest temporary mode
     [ -x "$INSTALL_DIR/bin/sing-box" ] || die "Existing core not found: $INSTALL_DIR/bin/sing-box"
-    [ -f "$CONFIG" ] || die "Existing configuration not found: $CONFIG"
+    [ -f "$CONFIG" ] || SH_SINGBOX_CONFIG="$CONFIG" sb_parts_active ||
+        die "Existing configuration or configuration sources not found: $CONFIG"
     [ -f "$init_path" ] || die "Existing procd service not found: $init_path"
     check_service_conflicts "$init_path"
-    for file in scripts/sbctl scripts/runtime-paths.sh scripts/download.sh scripts/configure-download.sh scripts/gateway.sh scripts/dns-guard.sh menu.sh uninstall.sh openwrt/sing-box.init config/config.template.json examples/xboard.sample.json examples/local.sample.json; do
+    for file in scripts/sbctl scripts/runtime-paths.sh scripts/download.sh scripts/configure-download.sh scripts/config-parts-lib.sh scripts/config-parts.sh scripts/gateway.sh scripts/dns-guard.sh menu.sh uninstall.sh openwrt/sing-box.init config/config.template.json examples/xboard.sample.json examples/local.sample.json; do
         [ -f "$REPO_ROOT/$file" ] || die "Incomplete source: missing $file"
     done
     [ ! "$CONFIG" -ef "$INSTALL_DIR/config/config.template.json" ] ||
@@ -306,6 +366,9 @@ ok "Required installer dependencies available"
 # -----------------------------------------------------------------------------
 info "Setting up directory structure at $INSTALL_DIR..."
 validate_provider_samples "$REPO_ROOT/examples"
+for file in config-parts-lib.sh config-parts.sh; do
+    [ -f "$REPO_ROOT/scripts/$file" ] || die "Incomplete source: missing scripts/$file"
+done
 mkdir -p "$INSTALL_DIR"/{bin,config,scripts,systemd,openwrt,board,geo,providers,runtime}
 mkdir -p "$(dirname "$CONFIG")"
 
@@ -332,6 +395,7 @@ chmod +x "$INSTALL_DIR/scripts"/*
 # -----------------------------------------------------------------------------
 info "Downloading reF1nd sing-box core for $ARCH ($LIBC)..."
 export SH_SINGBOX_HOME="$INSTALL_DIR"
+prepare_existing_parts
 "$INSTALL_DIR/scripts/update-core.sh"
 
 # -----------------------------------------------------------------------------
@@ -397,19 +461,8 @@ info "Downloading DustinWin rule-sets..."
 # -----------------------------------------------------------------------------
 # 8. Configuration Setup
 # -----------------------------------------------------------------------------
-if [ ! -f "$CONFIG" ]; then
-    info "Creating default config from template..."
-    create_default_config
-
-    if [ "$OS" = "openwrt" ]; then
-        info "OpenWrt: eBPF shared is disabled by default; select the LAN interface for this device explicitly."
-        info "After configuring your nodes, use 'sbctl gateway configure LAN_INTERFACE YOUR_LAN_CIDR' for gateway mode."
-    fi
-    ok "Created $CONFIG"
-else
-    ok "Preserved existing $CONFIG"
-    info "Source checkout config/config.json is not imported. Use 'sbctl import-config FILE' for an explicit validated import."
-fi
+initialize_configuration
+info "Source checkout config/config.json is not imported. Use 'sbctl import-config FILE' for an explicit validated import."
 
 # -----------------------------------------------------------------------------
 # 9. CLI Link & Service Registration
@@ -447,7 +500,10 @@ if [ "$OS" = "openwrt" ] || ! command -v systemctl >/dev/null 2>&1; then
     ok "Enabled OpenWrt procd service (/etc/init.d/sing-box)"
 else
     # Debian / Ubuntu systemd service
-    cp -f "$INSTALL_DIR/systemd/sing-box.service" /etc/systemd/system/
+    SYSTEMD_STAGE=$(mktemp /etc/systemd/system/.sing-box.service.XXXXXX) || die "Cannot stage systemd service"
+    render_systemd_service "$SYSTEMD_STAGE"
+    chmod 0644 "$SYSTEMD_STAGE" && mv -f "$SYSTEMD_STAGE" /etc/systemd/system/sing-box.service ||
+        { rm -f "$SYSTEMD_STAGE"; die "Cannot install systemd service"; }
     cp -f "$INSTALL_DIR/systemd/sing-box.slice" /etc/systemd/system/ 2>/dev/null || true
     systemctl daemon-reload
     systemctl enable sing-box.service
@@ -485,7 +541,12 @@ echo "════════════════════════�
 echo ""
 echo "Quick Start Commands:"
 echo "  1. Edit your proxy nodes in configuration:"
-echo "     vi $CONFIG"
+if sb_parts_active; then
+    echo "     sb (menu 9: edit configuration sections)"
+    echo "     Sources: $(sb_parts_dir)"
+else
+    echo "     vi $CONFIG"
+fi
 echo ""
 echo "  2. Start the service:"
 echo "     sbctl start"

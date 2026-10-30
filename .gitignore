@@ -17,6 +17,9 @@
 /config/*.menu.*
 /config/*.gateway.*
 /config/*.import.*
+/config/*.d
+/config/*.d.*
+/config/*.parts.*
 *.log
 .env
 .env.*

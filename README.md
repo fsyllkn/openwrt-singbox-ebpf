@@ -4,7 +4,7 @@
 
 **公开仓库：** [fsyllkn/openwrt-singbox-ebpf](https://github.com/fsyllkn/openwrt-singbox-ebpf)，默认分支 `main`。在线安装、源码更新均使用本仓库，无需 GitHub Token，也不要求安装 Git。
 
-本仓库包含通用配置和完整的本地 Provider 样例。**新装可以先启动服务、查看面板和示例节点，再逐项填写自己的上游。** 样例没有真实订阅、可用代理节点或内置账号；服务运行中不代表已经具备代理上网能力。安装器不会覆盖设备已有的运行配置。
+本仓库包含通用配置和完整的本地 Provider 样例。**新装可以先启动服务、查看面板和示例节点，再逐项填写自己的上游。** 新装使用分文件配置：用户维护 Provider、入站、出站及路由例外，项目维护 DNS 和基础分流策略。样例没有真实订阅、可用代理节点或内置账号；服务运行中不代表已经具备代理上网能力。已有单文件配置继续可用，不会被自动拆分。
 
 ## 1. 支持范围
 
@@ -126,7 +126,7 @@ UCI 项为 `sing-box.download.mode`、`sing-box.download.http_proxy`、`sing-box
 
 ### 先确认服务与面板可以启动
 
-菜单 **1** 安装/修复核心服务。没有现有运行配置时，安装器会同时准备完整 JSON 和两份非空的本地 Provider，不需要先填写订阅 URL。安装仍不自动启动服务；在固件支持相应 eBPF 能力、安装资源齐全后，可以执行：
+菜单 **1** 安装/修复核心服务。没有现有运行配置时，安装器会准备用户配置分文件、生成完整运行 JSON，并初始化两份非空的本地 Provider，不需要先填写订阅 URL。安装仍不自动启动服务；在固件支持相应 eBPF 能力、安装资源齐全后，可以执行：
 
 ```sh
 sbctl config
@@ -162,15 +162,15 @@ ssh -L 19090:127.0.0.1:9090 root@OPENWRT_IP
 
 ### 再填写真实节点或订阅
 
-手工节点/X-Tunnel：编辑运行目录中的 `providers/local.json`，或把 `local` Provider 的 `path` 改成实际导出路径。文件需至少包含一个核心支持的代理节点。保存后，在面板的 `proxy` 组选择真实的 `local/<节点标签>`。
+手工节点/X-Tunnel：编辑运行目录中的 `providers/local.json`，或在 `config/config.d/providers.json` 中把 `local` Provider 的 `path` 改成实际导出路径。文件需至少包含一个核心支持的代理节点。菜单 **9** 可以选择要编辑的配置部分；已有单文件模式仍编辑完整 JSON。重新加载本地 Provider 或重启后，在面板的 `proxy` 组选择真实的 `local/<节点标签>`。
 
-HTTP 订阅：参考 [HTTP 片段](examples/http-provider.sample.json)，将 `example.invalid` URL 换成自己的真实地址，再替换实际配置里同名的 `xboard` local Provider，保留另一个 `local` Provider。这个片段不是完整配置，不能直接作为 `sbctl import-config` 的输入。默认示例使用 `User-Agent: clash.meta`，省略 `http_client.detour`，通过核心默认拨号器下载；如果订阅必须经过代理，再把 `detour` 设为已配置且可用的代理出站标签。不要指向尚未配置的占位节点，也不要将它设为没有拨号选项的 `direct` 出站。
+HTTP 订阅：参考 [HTTP 片段](examples/http-provider.sample.json)，将 `example.invalid` URL 换成自己的真实地址，再替换 `config/config.d/providers.json` 里同名的 `xboard` local Provider，保留另一个 `local` Provider；单文件模式在完整 JSON 中修改。这个片段不是完整配置，不能直接作为 `sbctl import-config` 的输入。默认示例使用 `User-Agent: clash.meta`，省略 `http_client.detour`，通过核心默认拨号器下载；如果订阅必须经过代理，再把 `detour` 设为已配置且可用的代理出站标签。不要指向尚未配置的占位节点，也不要将它设为没有拨号选项的 `direct` 出站。
 
 切换成 remote 后，现有的新鲜 `xboard.json` 缓存可能暂时仍显示示例节点；在面板 Provider 页面手动更新 `xboard`，待真实节点出现后再选择。`path` 是可被订阅刷新覆盖的缓存，自己的手工节点应放在独立的 `local.json` 中。不要为了开启订阅而同时保留两个同名 Provider。
 
 固定核心启动时先建立 selector 静态成员，再加载 Provider。保留静态默认项，在面板选择动态 Provider 节点并由缓存保存；不要把 `xboard/<节点标签>` 直接填入初始 `outbounds` 或 `default`，以免产生启动期找不到节点的错误。字段与合并方法见 [Provider 说明](providers/README.md)。
 
-配置真实上游后，菜单 **16** 设置需要的 LAN 显式入口，菜单 **13** 设置需要的 LAN 透明网关；使用 X-Tunnel 时先启动其核心，再用菜单 **21** 对齐实际专用 UID 排除。最后预检、重启并在客户端验证。安装或更新不会把公开起始配置覆盖到已有运行 JSON，也不会用样例替换已有节点或订阅缓存。
+配置真实上游后，菜单 **16** 设置需要的 LAN 显式入口，菜单 **13** 设置需要的 LAN 透明网关；使用 X-Tunnel 时先启动其核心，再用菜单 **21** 对齐实际专用 UID 排除。最后预检、重启并在客户端验证。这些工具在分文件模式下会把修改写回 `inbounds.json`，后续生成配置时保留。安装或更新不会用公开起始配置或样例替换用户的节点、订阅缓存和自定义配置部分。
 
 ## 5. 保留 LAN 入站与远端内网访问
 
@@ -184,32 +184,96 @@ HTTP 订阅：参考 [HTTP 片段](examples/http-provider.sample.json)，将 `ex
 | `runtime/gateway.json` 的 `interface` / `source_cidr` | 从哪个接口接管哪些 LAN 客户端 |
 | `route.rules[].ip_cidr` + `outbound` | 把哪些目的地址交给指定节点访问 |
 
-例如，希望访问 `10.77.50.10:14432` 时经过能到达远端私网的 `remote-office` 节点，相关目的规则应在通用私网直连之前：
+例如，希望访问 `10.77.50.10:14432` 时经过能到达远端私网的 `remote-office` 节点，先在 `outbounds.json` 定义这个节点或包含它的静态分组，再把以下内容放入 `routing.json`：
 
 ```json
-[
-  { "ip_cidr": ["10.77.50.10/32", "10.88.60.0/24"], "outbound": "remote-office" },
-  { "ip_is_private": true, "outbound": "direct" }
-]
+{
+  "route": {
+    "rules": [
+      {
+        "ip_cidr": ["10.77.50.10/32", "10.88.60.0/24"],
+        "action": "route",
+        "outbound": "remote-office"
+      }
+    ]
+  }
+}
 ```
 
-修改本地 LAN 时，不要把这些远端目的规则一起改成新 LAN 网段。网关、UID 和代理配置工具保留自定义入站选项、其他用户及明确目的路由；严格隐私合并也保留自定义规则的相对顺序。
+生成器把这些例外放在固定的 DNS 劫持、嗅探、STUN/DTLS 防护规则之后，通用私网直连和地区分流之前；因此远端内网目标不会先被通用私网规则直连。可用 `source_ip_cidr` 限定某些 LAN 客户端，也可与目的网段同时使用。分文件模式要求例外有明确的 IP/CIDR 或进程条件，并指向已定义的静态出站标签。
+
+修改本地 LAN 时，不要把这些远端目的规则一起改成新 LAN 网段。网关、UID 和代理配置工具保留自定义入站选项、其他用户及明确目的路由。需要自定义域名分流、私有 DNS 或调整固定规则顺序时，可使用单文件模式；本版不会替这些高级规则猜测应该使用哪一个 DNS。
 
 进入网关的私网 TCP/UDP 由 sing-box 路由决定出口，不再因目的地址属于 LAN 前缀而一律提前放行。路由器自身地址和保留地址仍作本地处理。若客户端直接通过同网段 ARP 访问目标，流量可能根本不经过 OpenWrt，此时需设置具体路由或使用显式 HTTP/SOCKS5 代理。远端节点必须能够访问目标服务。
 
-## 6. 文件路径与配置保护
+## 6. 分文件配置、固定策略与配置保护
+
+### 日常编辑哪些文件
+
+默认运行目录为 `/opt/sing-box`。菜单 **9** 按部分编辑，先把草稿组装成完整配置并预检，通过后才提交源文件和运行 JSON；失败时保留原配置，并打印被拒绝草稿的保存位置。保存不自动重启。
+
+| 用户配置文件 | 内容与格式 |
+| --- | --- |
+| `config/config.d/providers.json` | `{"providers":[...]}`：订阅 URL、缓存路径、本地 Provider 引用 |
+| `config/config.d/inbounds.json` | `{"inbounds":[...]}`：eBPF、LAN 监听 IP/端口、认证用户等 |
+| `config/config.d/outbounds.json` | `{"outbounds":[...]}`：静态节点和 `proxy`、`ai` 等分组 |
+| `config/config.d/routing.json` | `{"route":{"rules":[...]}}`：指定源/目的 IP、网段或进程的路由例外，默认空数组 |
+| `config/config.d/settings.json` | 日志、面板、缓存等其余顶层设置；不允许写入 `dns`、`route` 或上述三个数组 |
+
+对应的五份公开样例位于 [examples](examples/README.md)。`config.d/providers.json` 是 **Provider 定义**；`providers/xboard.json` 和 `providers/local.json` 是它们加载的 **节点数据**，两层文件不能互换。核心的相对路径仍以运行目录为基准。
+
+项目从 `config/config.template.json` 提取固定 `dns`、`route`，与用户源文件组装为 `config/config.json`。服务仍只读取这一份完整 JSON，不使用 `sing-box -C` 的目录合并，也不运行 `sing-box merge`。`layout.json` 记录格式版本及生成状态，由工具管理。
+
+`proxy`、`ai` 和 `direct` 是固定策略引用的保留标签。可以自定义代理节点和分组成员，但需要保留有效的静态成员、默认项以及 Provider 引用；生成器检查重复标签、缺失引用、循环依赖，并拒绝 `proxy`/`ai` 的选择链混入 `direct` 或 `Compatible` 兜底。实际节点是否能够连通仍需用户验证。
+
+### 固定策略的作用与边界
+
+固定模板负责 DNS 劫持规则、加密上游、DNS 分流、AI 独立 DNS、AAAA 空答复、STUN/DTLS 拒绝，以及基础业务分流。AI DNS 请求使用 `ai`，相应 AI 业务也使用 `ai`；常规代理 DNS 和代理业务使用 `proxy`。因此更换这些组内的节点时，关联策略不用再分别修改。
+
+这表示 **DNS 请求和相应业务关联到同一出站组**，不保证两者最终公网 IP、地区或 ASN 相同：公共递归 DNS 有自己的出口，分组也可能包含其他选择或测速组。规则集、直连规则和用户添加的 IP/进程例外并非一一对应的域名 DNS 策略。远端私网 IP 可以按例外走指定节点，但远端私有域名还需要配置可达的内网 DNS；这类定制使用单文件模式。
+
+防护只覆盖经过本机/网关且被接管的流量。LAN 网关目前接管 IPv4，不能据此宣称客户端 IPv6、应用自带 DoH 或未经过网关的连接已经全部受控。AAAA 空答复和 STUN/DTLS 拒绝也会影响部分应用，应在实际设备与客户端上验证。
+
+### 现有单文件配置如何迁移
+
+更新脚本后，已有 JSON 仍是单文件模式。菜单 **25** 可选择无损拆分，等价命令为：
+
+```sh
+sbctl split-config
+sbctl config
+sbctl preflight
+sbctl restart
+```
+
+迁移会比较现有 DNS、固定路由内容及规则顺序，仅在能完整保留配置含义时拆分；允许提取位于约定位置的 IP/进程例外。如果现有 DNS 或规则顺序不同，会明确拒绝，原配置与运行服务保持不变。不要为了通过迁移而直接用模板覆盖个人配置。
+
+生成后的完整 JSON 不作为日常编辑入口。直接改动它会触发保护，避免下一次生成时丢失手工修改。需要导入完整 JSON 时使用 `sbctl import-config FILE`，分文件模式会执行相同的兼容性检查。需要保留自由定制时，菜单 **25** 或 `sbctl single-config` 可保留有效完整 JSON、归档源目录并返回单文件模式；不自动重启。
+
+通过 SSH 编辑源文件后，运行 `sbctl preflight` 组装并检查，再重启。也可以先在目录外编辑草稿，使用下面的命令校验后提交，避免把无效草稿写进当前源文件：
+
+```sh
+sbctl config-part outbounds /tmp/my-outbounds.json
+sbctl config-part routing /tmp/my-routing.json
+sbctl restart
+```
+
+这两个文件也必须带上表格所列的顶层包装，不能只写数组。直接编辑源文件后如果预检失败，旧运行 JSON 保留，重启会在停止旧进程之前取消；恢复草稿后再预检。停止服务和清理网关不依赖源文件校验，配置错误时仍能关闭接管。
+
+### 路径和个人数据保护
 
 | 路径/设置 | 作用 |
 | --- | --- |
 | `/opt/sing-box` | 默认运行目录 |
-| `/opt/sing-box/config/config.json` | 默认实际运行配置 |
+| `/opt/sing-box/config/config.json` | 默认实际运行配置；分文件模式下为生成结果 |
+| `/opt/sing-box/config/config.d` | 分文件模式的用户配置源；自定义 `live.json` 对应相邻的 `live.d` |
+| `/opt/sing-box/config/config.template.json` | 项目维护的固定 DNS/路由策略来源 |
 | `/opt/sing-box/providers` | 设备上的个人 Provider 和下载缓存 |
 | `/opt/sing-box/runtime/source-dir` | 最近部署时记录的源码目录 |
 | `/opt/sing-box/runtime/gateway.json` | 此设备的 LAN 接口与客户端源网段 |
 | `sing-box.main.service_dir` / `config_file` | UCI 中持久设置的运行目录与配置路径 |
 | `SH_SINGBOX_HOME` / `SH_SINGBOX_CONFIG` | 显式命令环境覆盖，路径必须为绝对路径 |
 
-以 `sbctl config` 输出为准。源码配置与运行配置可以是不同文件；更新源码不会自动导入用户配置。要导入自己编辑的完整配置：
+以 `sbctl config` 输出的路径和模式为准。源码配置与运行配置可以是不同文件；更新源码不会自动导入用户配置。要导入自己编辑的完整配置：
 
 ```sh
 sbctl import-config /path/to/your-config.json
@@ -217,9 +281,9 @@ sbctl preflight
 sbctl restart
 ```
 
-导入先内核校验、备份，再替换；不自动重启。预检每次核对实际 IPv4 监听地址及上游 UID，不把语法缓存当成端口绑定成功。配置编辑工具保留配置符号链接。
+导入先核心校验、备份，再替换；不自动重启。分文件模式还检查固定策略兼容性，并对重组结果执行设备预检。预检每次核对实际 IPv4 监听地址及上游 UID，不把语法缓存当成端口绑定成功。配置编辑工具保留配置符号链接。
 
-个人订阅、节点密码和下载后的 Provider 只存放在设备的运行目录。仓库将虚拟 `.sample.json` 放在 `examples/`，`providers/` 仅跟踪通用模板和说明；真实 `xboard.json`、`local.json` 及其他缓存被 Git 忽略。更新只补缺失的样例，不替换已有 Provider；只有新建运行 JSON 时才初始化缺失的运行 Provider 文件。不要把私人数据写回公开 `.sample.json` 或起始配置后提交，Git 忽略规则不会保护已经跟踪的文件。
+个人订阅、节点密码和下载后的 Provider 只存放在设备的运行目录。仓库将虚拟 `.sample.json` 放在 `examples/`，`providers/` 仅跟踪通用模板和说明；真实 `xboard.json`、`local.json`、默认配置分片目录及其备份被 Git 忽略。更新只补缺失的样例，不替换已有 Provider；只有真正新建运行配置时才初始化缺失的运行 Provider 文件，已有分片但生成 JSON 丢失时不会重新填入样例。不要把私人数据写回公开 `.sample.json` 或起始配置后提交，Git 忽略规则不会保护已经跟踪的文件。
 
 ## 7. 在线更新
 
@@ -237,7 +301,7 @@ sbctl preflight
 sbctl restart
 ```
 
-目录不同请替换 `cd` 路径。`--scripts-only` 会先检查并备份，再更新脚本、菜单、procd 文件及配套模板；保留运行 JSON、Provider、核心和网关设置，不联网、不自动重启。
+目录不同请替换 `cd` 路径。`--scripts-only` 会先检查并备份，再更新脚本、菜单、procd 文件及配套模板；保留用户分片、运行 JSON、Provider、核心和网关设置，不联网、不生成配置、不自动重启。分文件模式下，新模板中的 DNS/基础路由策略在下一次预检或启动时组装，通过校验后才写入生成 JSON；单文件模式不会自动改变 DNS/路由。
 
 ### 一次完成源码与脚本更新
 
@@ -249,7 +313,7 @@ bash ./install.sh --scripts-only
 
 需要本次临时代理时，为引导命令添加 `--http-proxy URL` 或 `--github-proxy PREFIX`。Git 工作树不会被压缩包覆盖；使用菜单的干净工作树检查和 `git pull --ff-only` 流程。
 
-菜单 **12** 单独更新核心：先下载并验证版本校验值，用候选核心检查现有配置后才替换；正在运行时重启失败会恢复旧二进制并尝试恢复服务。
+菜单 **12** 单独更新核心：先下载并验证版本校验值，用候选核心检查现有配置后才替换；正在运行时重启失败会恢复旧二进制并尝试恢复服务。分文件模式先检查当前源文件与生成 JSON 是否一致；存在尚未应用的编辑、新模板策略或生成 JSON 缺失时，请先用当前核心执行 `sbctl preflight`，确认配置后再更新核心。候选核心验证期间也会检查源文件是否变化，避免校验一份配置却运行另一份。
 
 ## 8. 常用菜单和诊断
 
@@ -257,13 +321,14 @@ bash ./install.sh --scripts-only
 | --- | --- |
 | 1 / 2 | 安装修复 / 更新公开源码 |
 | 3 / 4 / 5 / 6 / 7 / 8 | 重启 / 日志 / 启动 / 停止 / 状态 / 配置校验 |
-| 9 / 10 | 编辑运行配置 / 迁移旧版 DNS、block、shared 设置 |
+| 9 / 10 | 选择配置分片编辑（单文件模式编辑完整 JSON）/ 单文件旧格式迁移 |
 | 11 / 12 | 更新规则集 / 核心 |
 | 13 / 14 / 15 | 设置 / 查看 / 关闭 LAN 透明网关 |
 | 16 / 17 | 配置 / 关闭 LAN HTTP/SOCKS5 入口 |
 | 18 / 19 | 应用严格隐私策略 / 主机与配置诊断 |
 | 20 / 21 / 22 | 检查 X-Tunnel Provider / 对齐实际 UID / eBPF 与路由诊断 |
 | 23 / 24 | 卸载服务保留配置 / 下载代理设置 |
+| 25 | 无损拆分配置 / 归档分片并返回单文件模式 |
 
 严格隐私模板使用 AI 独立 DNS、AAAA 空答复和 STUN/DTLS 拒绝策略。视频会议、语音和 WebRTC 功能可能受影响；这也不能控制没有经过网关的客户端流量。DNS 使用同一代理出站不等于解析服务位于该节点本机。需要节点所在内网 DNS 时，另行配置实际可达的解析服务。
 
@@ -281,9 +346,9 @@ logread -e sing-box
 
 ## 9. 验证与发布内容
 
-GitHub Actions 覆盖 shell 语法、菜单、运行路径、配置保留、UID、网关、核心更新回滚、安装卸载、下载代理及独立引导流程；在 CI Linux 上解析并加载/移除实际生成的 nft 规则。公开配置还有结构化脱敏检查。
+GitHub Actions 覆盖 shell 语法、菜单、运行路径、配置保留、UID、网关、核心更新回滚、安装卸载、下载代理及独立引导流程；分文件测试覆盖无损迁移、配置图检查、事务回滚、缓存失效、菜单编辑和停止保护。在 CI Linux 上解析并加载/移除实际生成的 nft 规则，公开配置还有结构化脱敏检查。
 
-除了对完整 JSON 执行真实核心 `check`，CI 还在只有 loopback 的独立 network namespace 内真正启动核心：验证本地样例加载、selector 节点选择、HTTP 片段从本地模拟订阅获取节点及缓存重启。该测试保留公开配置的 Provider/selector 结构，移除了与其无关的 eBPF、远程规则集和 WebUI 下载，不向虚拟订阅地址发请求。
+除了对完整 JSON 执行真实核心 `check`，CI 还使用同一固定核心验证分文件初始化、节点编辑、私网路由和丢失输出重建。另一个只有 loopback 的独立 network namespace 会真正启动核心：验证本地样例加载、selector 节点选择、HTTP 片段从本地模拟订阅获取节点及缓存重启。Provider 启动测试保留公开配置的 Provider/selector 结构，移除了与其无关的 eBPF、远程规则集和 WebUI 下载，不向虚拟订阅地址发请求。
 
 下载代理和服务边界测试使用隔离的模拟工具，不修改测试主机的真实路由。CI 的 nft 验证和核心配置校验不等同于对某台 OpenWrt 的 BPF、客户端 DNS、IPv6或端到端转发验收。
 

@@ -31,7 +31,7 @@ with tempfile.TemporaryDirectory(prefix='sb-public-bootstrap-') as directory:
     for name in ('quick-install.sh', 'install.sh', 'uninstall.sh', 'README.md'):
         shutil.copyfile(base / name, archive_source / name)
     (archive_source / 'menu.sh').write_text('#!/bin/sh\nexit 0\n')
-    for name in ('sbctl', 'runtime-paths.sh', 'download.sh', 'configure-download.sh', 'gateway.sh', 'dns-guard.sh', 'update-core.sh'):
+    for name in ('sbctl', 'runtime-paths.sh', 'download.sh', 'configure-download.sh', 'config-parts-lib.sh', 'config-parts.sh', 'gateway.sh', 'dns-guard.sh', 'update-core.sh'):
         shutil.copyfile(base / 'scripts' / name, archive_source / 'scripts' / name)
     shutil.copyfile(base / 'openwrt/sing-box.init', archive_source / 'openwrt/sing-box.init')
     (archive_source / 'config/config.template.json').write_text('{"public_template":true}\n')
@@ -96,6 +96,8 @@ pathlib.Path(output).write_bytes(pathlib.Path(os.environ['BOOT_ARCHIVE']).read_b
         if name == 'http':
             assert call['no_proxy'] == '', 'Explicit HTTP mode silently bypassed selected proxy'
         assert (target / 'scripts/download.sh').is_file(), 'Shared downloader was not deployed'
+        for helper in ('config-parts-lib.sh', 'config-parts.sh'):
+            assert (target / 'scripts' / helper).is_file(), 'Configuration composition helper was not deployed'
         assert not (target / 'config/config.json').exists(), 'Bootstrap copied the source config over a device config location'
         assert not (target / 'providers/downloaded.json').exists(), 'Bootstrap copied a provider cache'
         for provider in ('xboard', 'local'):
@@ -132,12 +134,14 @@ pathlib.Path(output).write_bytes(pathlib.Path(os.environ['BOOT_ARCHIVE']).read_b
     result = subprocess.run(['sh', str(bootstrap), '--archive', str(archive), '--no-menu'], env=dict(env, SB_INSTALL_SOURCE_DIR=str(offline), SB_DOWNLOAD_MODE='invalid-saved-settings'), capture_output=True, text=True)
     assert result.returncode == 0, 'Offline bootstrap unexpectedly depended on download settings'
     assert not (root / 'download-log').exists(), 'Offline bootstrap invoked a downloader'
-    incomplete_source = root / 'incomplete-source'
-    shutil.copytree(archive_source, incomplete_source)
-    (incomplete_source / 'examples/local.sample.json').unlink()
-    incomplete_target = root / 'incomplete-target'
-    result = subprocess.run(['sh', str(bootstrap), '--source', str(incomplete_source), '--no-menu'], env=dict(env, SB_INSTALL_SOURCE_DIR=str(incomplete_target)), capture_output=True, text=True)
-    assert result.returncode != 0 and not incomplete_target.exists(), 'Source missing a required sample was deployed'
+    for index, missing in enumerate(('examples/local.sample.json', 'scripts/config-parts-lib.sh', 'scripts/config-parts.sh')):
+        incomplete_source = root / f'incomplete-source-{index}'
+        shutil.copytree(archive_source, incomplete_source)
+        (incomplete_source / missing).unlink()
+        incomplete_target = root / f'incomplete-target-{index}'
+        result = subprocess.run(['sh', str(bootstrap), '--source', str(incomplete_source), '--no-menu'], env=dict(env, SB_INSTALL_SOURCE_DIR=str(incomplete_target)), capture_output=True, text=True)
+        assert result.returncode != 0 and not incomplete_target.exists(), f'Source missing {missing} was deployed'
+        assert not (root / 'download-log').exists(), 'Incomplete local source triggered an online repair'
 
     # Reproduce the previous published bootstrap's whitelist: it copied all
     # examples/*.json but only the provider template/README. A one-step update

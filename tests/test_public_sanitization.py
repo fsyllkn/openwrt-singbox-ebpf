@@ -24,6 +24,11 @@ JSON_FILES = (
     ROOT / "examples" / "local.sample.json",
     ROOT / "examples" / "lan-private-routing.json",
     ROOT / "examples" / "http-provider.sample.json",
+    ROOT / "examples" / "config-providers.sample.json",
+    ROOT / "examples" / "config-inbounds.sample.json",
+    ROOT / "examples" / "config-outbounds.sample.json",
+    ROOT / "examples" / "config-routing.sample.json",
+    ROOT / "examples" / "config-settings.sample.json",
 )
 DOCUMENTATION_NETS = tuple(ipaddress.ip_network(cidr) for cidr in
                            ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24"))
@@ -96,6 +101,29 @@ class PublicSanitizationTests(unittest.TestCase):
                                 f"{name}: samples must be explicit loopback SOCKS placeholders")
         self.assertTrue(self.docs["provider.template.json"] == self.docs["local.sample.json"],
                         "The generic provider template must be the same nonempty local sample.")
+
+    def test_section_samples_reconstruct_starter_without_policy_overrides(self):
+        for section in ("providers", "inbounds", "outbounds"):
+            self.assertTrue(self.docs[f"config-{section}.sample.json"] == {section: self.starter[section]},
+                            f"{section}: native section sample differs from the starter or contains extra keys")
+        routing = self.docs["config-routing.sample.json"]
+        self.assertTrue(routing == {"route": {"rules": []}},
+                        "Default routing extensions must not contain personal rules or replace managed policy.")
+        settings = self.docs["config-settings.sample.json"]
+        expected_settings = {key: value for key, value in self.starter.items()
+                             if key not in {"providers", "inbounds", "outbounds", "dns", "route"}}
+        self.assertTrue(settings == expected_settings,
+                        "Settings sample must preserve only non-policy and non-section top-level fields.")
+        composed = dict(settings)
+        for section in ("providers", "inbounds", "outbounds"):
+            composed.update(self.docs[f"config-{section}.sample.json"])
+        composed["dns"] = self.starter["dns"]
+        managed_route = self.starter["route"]
+        composed["route"] = dict(managed_route, rules=(managed_route["rules"][:3]
+                                                      + routing["route"]["rules"]
+                                                      + managed_route["rules"][3:]))
+        self.assertTrue(composed == self.starter,
+                        "Section examples plus managed DNS/routing no longer reproduce the full starter.")
 
     def test_http_subscription_is_an_isolated_placeholder_fragment(self):
         fragment = self.docs["http-provider.sample.json"]
@@ -217,6 +245,7 @@ class PublicSanitizationTests(unittest.TestCase):
         self.assertTrue(all(item in ignores for item in (
             "/providers/*", "!/providers/provider.template.json", "!/providers/README.md",
             "/runtime/", "/geo/", "/bin/", "/board/",
+            "/config/*.d", "/config/*.d.*", "/config/*.parts.*",
         )), "Downloaded nodes/assets/runtime state must be ignored.")
 
     def test_downloaded_rules_are_available_to_first_start(self):

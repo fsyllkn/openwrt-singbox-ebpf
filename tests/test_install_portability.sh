@@ -7,8 +7,9 @@ trap 'rm -rf "$TEST_DIR"' EXIT HUP INT TERM
 fail() { printf 'FAILED: %s\n' "$*" >&2; exit 1; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 info() { printf '%s\n' "$*"; }
+. "$BASE/scripts/config-parts-lib.sh"
 awk '
-  /^(record_source_directory|validate_provider_samples|copy_missing_file|deploy_provider_samples|create_default_config|check_service_conflicts)\(\) \{/ { emit = 1 }
+  /^(record_source_directory|validate_provider_samples|copy_missing_file|deploy_provider_samples|create_default_config|initialize_configuration|prepare_existing_parts|render_systemd_service|check_service_conflicts)\(\) \{/ { emit = 1 }
   emit { print }
   emit && /^}$/ { emit = 0 }
 ' "$BASE/install.sh" > "$TEST_DIR/install-functions.sh"
@@ -108,6 +109,157 @@ done
     [ -f "$INSTALL_DIR/providers/local.sample.json" ] || fail 'deployment did not fill missing sample beside edited file'
 )
 
+# Only a genuinely new installation invokes init, after full JSON and both
+# provider files exist. Existing single-file devices require explicit migration.
+(
+    INSTALL_DIR=$TEST_DIR/parts\ installation
+    CONFIG=$TEST_DIR/parts\ external/router.json
+    mkdir -p "$INSTALL_DIR/scripts" "$INSTALL_DIR/config"
+    cp "$BASE/config/config.template.json" "$INSTALL_DIR/config/"
+    PARTS_EVENTS=$TEST_DIR/parts-install-events; export PARTS_EVENTS
+    cat > "$INSTALL_DIR/scripts/config-parts.sh" <<'SH'
+#!/bin/sh
+set -eu
+[ "$*" = init ] || exit 80
+[ -s "$SH_SINGBOX_CONFIG" ] || exit 81
+for name in xboard local; do [ -s "$SH_SINGBOX_HOME/providers/$name.json" ] || exit 82; done
+[ "$(jq -r '.experimental.clash_api.external_ui' "$SH_SINGBOX_CONFIG")" = "$SH_SINGBOX_HOME/board/dist" ] || exit 83
+printf 'init:%s\n' "$SH_SINGBOX_CONFIG" >> "$PARTS_EVENTS"
+exit "${MOCK_PARTS_INIT_STATUS:-0}"
+SH
+    chmod 0755 "$INSTALL_DIR/scripts/config-parts.sh"
+    deploy_provider_samples
+    initialize_configuration > "$TEST_DIR/parts-install.log"
+    [ "$(cat "$PARTS_EVENTS")" = "init:$CONFIG" ] || fail 'fresh installation did not split the selected external configuration'
+    cp "$CONFIG" "$TEST_DIR/parts-initial-config.json"
+    initialize_configuration > "$TEST_DIR/parts-existing.log"
+    [ "$(wc -l < "$PARTS_EVENTS")" -eq 1 ] || fail 'existing full JSON was automatically migrated'
+    cmp "$TEST_DIR/parts-initial-config.json" "$CONFIG" || fail 'existing JSON changed during install'
+    rm "$CONFIG" "$INSTALL_DIR/providers/xboard.json" "$INSTALL_DIR/providers/local.json"
+    if (MOCK_PARTS_INIT_STATUS=27 initialize_configuration) > "$TEST_DIR/parts-failed.log" 2>&1; then
+        fail 'failed initial split was reported as a successful install'
+    fi
+    cmp "$TEST_DIR/parts-initial-config.json" "$CONFIG" || fail 'split failure removed or changed the full initial configuration'
+    [ -f "$INSTALL_DIR/providers/xboard.json" ] && [ -f "$INSTALL_DIR/providers/local.json" ] || fail 'split failure removed initial providers'
+    grep -Fq 'sbctl split-config' "$TEST_DIR/parts-failed.log" || fail 'split failure did not provide recovery command'
+)
+
+# Exercise fresh install and recovery with the actual composer. The controller
+# is a read-only JSON checker; no core, network or host service is started.
+(
+    INSTALL_DIR=$TEST_DIR/real\ parts\ installation
+    CONFIG=$TEST_DIR/real\ parts\ external/router.json
+    mkdir -p "$INSTALL_DIR/scripts" "$INSTALL_DIR/config" "$INSTALL_DIR/bin" "$INSTALL_DIR/runtime"
+    cp "$BASE/config/config.template.json" "$INSTALL_DIR/config/"
+    for helper in runtime-paths.sh config-parts-lib.sh config-parts.sh; do
+        cp "$BASE/scripts/$helper" "$INSTALL_DIR/scripts/$helper"
+        chmod 0755 "$INSTALL_DIR/scripts/$helper"
+    done
+    cat > "$INSTALL_DIR/scripts/sbctl" <<'SH'
+#!/bin/sh
+set -eu
+[ "$*" = preflight ] || exit 80
+. "$SH_SINGBOX_HOME/scripts/runtime-paths.sh"
+sb_load_paths
+. "$SH_SINGBOX_HOME/scripts/config-parts-lib.sh"
+sb_parts_prepare
+jq -e 'type == "object"' "$SH_SINGBOX_CONFIG" >/dev/null
+SH
+    printf '#!/bin/sh\nexit 83\n' > "$INSTALL_DIR/bin/sing-box"
+    chmod 0755 "$INSTALL_DIR/scripts/sbctl" "$INSTALL_DIR/bin/sing-box"
+    deploy_provider_samples
+    initialize_configuration > "$TEST_DIR/real-parts-install.log"
+    jq -e '.format == "sing-box-config-parts" and .version == 1' "${CONFIG%.json}.d/layout.json" >/dev/null || fail 'fresh installer did not create valid parts layout'
+    jq -e '[keys[]] == ["providers"] and (.providers|length==2)' "${CONFIG%.json}.d/providers.json" >/dev/null || fail 'fresh installer did not retain Provider definitions in their section'
+    cp "$CONFIG" "$TEST_DIR/real-generated.json"
+    cp -a "$INSTALL_DIR/providers" "$TEST_DIR/real-providers"
+    cp -a "${CONFIG%.json}.d" "$TEST_DIR/real-parts"
+    rm "$CONFIG"
+    create_default_config
+    [ ! -e "$CONFIG" ] || fail 'existing parts were seeded with a new default config'
+    prepare_existing_parts > "$TEST_DIR/real-parts-recover.log"
+    jq -e -s '.[0] == .[1]' "$CONFIG" "$TEST_DIR/real-generated.json" >/dev/null || fail 'full install did not recover equivalent generated JSON'
+    diff -r "$TEST_DIR/real-providers" "$INSTALL_DIR/providers" || fail 'existing-parts recovery replaced provider files'
+    for section in providers inbounds outbounds routing settings; do
+        cmp "$TEST_DIR/real-parts/$section.json" "${CONFIG%.json}.d/$section.json" || fail 'existing-parts recovery changed an editable source'
+    done
+)
+
+# A reserved companion path, even malformed or dangling, is never fresh.
+for shape in directory regular_file dangling_link; do
+    (
+        INSTALL_DIR=$TEST_DIR/active-$shape/home
+        CONFIG=$TEST_DIR/active-$shape/elsewhere/router.json
+        mkdir -p "$(dirname "$CONFIG")"
+        parts_dir=${CONFIG%.json}.d
+        case "$shape" in
+            directory) mkdir "$parts_dir"; printf 'invalid marker\n' > "$parts_dir/layout.json" ;;
+            regular_file) printf 'not a directory\n' > "$parts_dir" ;;
+            dangling_link) ln -s "$TEST_DIR/missing-parts-target" "$parts_dir" ;;
+        esac
+        create_default_config
+        initialize_configuration > "$TEST_DIR/active-$shape.log"
+        [ ! -e "$CONFIG" ] || fail 'missing generated JSON was replaced by defaults'
+        [ ! -e "$INSTALL_DIR/providers" ] || fail 'existing parts received dummy provider caches'
+        if [ "$shape" = dangling_link ]; then [ -L "$parts_dir" ] || fail 'dangling parts link replaced'; fi
+    )
+done
+
+# A full install prepares existing sources with the old core before updating;
+# failed preparation never becomes a new-install fallback.
+(
+    INSTALL_DIR=$TEST_DIR/prepare-existing/home
+    CONFIG=$TEST_DIR/prepare-existing/custom.json
+    mkdir -p "$INSTALL_DIR/bin" "$INSTALL_DIR/scripts" "${CONFIG%.json}.d"
+    printf '#!/bin/sh\nexit 0\n' > "$INSTALL_DIR/bin/sing-box"
+    cat > "$INSTALL_DIR/scripts/sbctl" <<'SH'
+#!/bin/sh
+[ "$*" = preflight ] || exit 80
+[ ! -e "$SH_SINGBOX_CONFIG" ] || exit 81
+exit "${MOCK_PREFLIGHT_STATUS:-0}"
+SH
+    chmod 0755 "$INSTALL_DIR/bin/sing-box" "$INSTALL_DIR/scripts/sbctl"
+    prepare_existing_parts > "$TEST_DIR/prepare-existing.log"
+    if (MOCK_PREFLIGHT_STATUS=28 prepare_existing_parts) > "$TEST_DIR/prepare-failed.log" 2>&1; then
+        fail 'failed existing-parts preparation was accepted'
+    fi
+    [ ! -e "$CONFIG" ] && [ ! -e "$INSTALL_DIR/providers" ] || fail 'failed preflight seeded defaults'
+)
+
+# Generated systemd units use identical custom selectors for all helpers and
+# core arguments; reload validation must precede the HUP signal.
+(
+    INSTALL_DIR=$TEST_DIR/systemd\ installation
+    CONFIG=$TEST_DIR/external\ systemd/router.json
+    mkdir -p "$INSTALL_DIR/systemd"
+    cp "$BASE/systemd/sing-box.service" "$INSTALL_DIR/systemd/"
+    render_systemd_service "$TEST_DIR/generated.service"
+    python3 - "$TEST_DIR/generated.service" "$INSTALL_DIR" "$CONFIG" <<'PY'
+from pathlib import Path
+import sys
+unit = Path(sys.argv[1]).read_text()
+home, config = sys.argv[2:]
+assert f'Environment="SH_SINGBOX_HOME={home}" "SH_SINGBOX_CONFIG={config}"' in unit
+assert f'ExecStart="{home}/bin/sing-box" run -c "{config}" -D "{home}"' in unit
+assert f'WorkingDirectory={home}' in unit
+reload = [line for line in unit.splitlines() if line.startswith('ExecReload=')]
+assert reload == [f'ExecReload="{home}/scripts/sbctl" preflight', 'ExecReload=/bin/kill -HUP $MAINPID']
+assert '/opt/sing-box' not in unit
+PY
+    if command -v systemd-analyze >/dev/null 2>&1; then
+        mkdir -p "$INSTALL_DIR/scripts" "$INSTALL_DIR/bin"
+        for executable in scripts/sbctl scripts/dns-guard.sh scripts/gateway.sh bin/sing-box; do
+            printf '#!/bin/sh\nexit 0\n' > "$INSTALL_DIR/$executable"
+            chmod 0755 "$INSTALL_DIR/$executable"
+        done
+        cp "$BASE/systemd/sing-box.slice" "$TEST_DIR/"
+        cp "$TEST_DIR/generated.service" "$TEST_DIR/sing-box.service"
+        systemd-analyze verify "$TEST_DIR/sing-box.service" > "$TEST_DIR/systemd-verify.log" 2>&1 || {
+            cat "$TEST_DIR/systemd-verify.log" >&2; fail 'generated service unit is not valid systemd syntax'
+        }
+    fi
+)
+
 # The generic names must not silently replace a firmware package or other tool.
 mkdir -p "$TEST_DIR/aliases"
 printf '#!/bin/sh\n# distribution sing-box\n' > "$TEST_DIR/init"
@@ -155,7 +307,7 @@ BOOT_TARGET=$TEST_DIR/bootstrap\ target
 mkdir -p "$BOOT_SOURCE/scripts" "$BOOT_SOURCE/openwrt" "$BOOT_SOURCE/config" "$BOOT_SOURCE/examples" \
     "$BOOT_SOURCE/providers" "$BOOT_TARGET/config" "$BOOT_TARGET/providers"
 for file in README.md quick-install.sh install.sh uninstall.sh; do cp "$BASE/$file" "$BOOT_SOURCE/$file"; done
-for file in sbctl runtime-paths.sh download.sh configure-download.sh gateway.sh dns-guard.sh update-core.sh; do
+for file in sbctl runtime-paths.sh download.sh configure-download.sh config-parts-lib.sh config-parts.sh gateway.sh dns-guard.sh update-core.sh; do
     cp "$BASE/scripts/$file" "$BOOT_SOURCE/scripts/$file"
 done
 cp "$BASE/openwrt/sing-box.init" "$BOOT_SOURCE/openwrt/"

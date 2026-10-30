@@ -13,6 +13,11 @@ case "$1" in
     version) echo 'sing-box version NEW-test-core' ;;
     check)
         printf 'check:%s\n' "$*" >> "$TEST_EVENTS"
+        [ "$2" = -c ] && [ -f "$3" ] || exit 67
+        cp "$3" "$TEST_CHECK_CONFIG_CAPTURE"
+        if [ "${MOCK_EDIT_PARTS_DURING_CHECK:-0}" -eq 1 ]; then
+            printf '\n' >> "${SH_SINGBOX_CONFIG%.json}.d/inbounds.json"
+        fi
         exit "${MOCK_CONFIG_STATUS:-0}" ;;
     *) exit 66 ;;
 esac
@@ -97,9 +102,10 @@ prepare() {
     TEST_EVENTS=$CASE_DIR/events
     TEST_DOWNLOAD_ARGS=$CASE_DIR/download-args
     TEST_DOWNLOAD_ENV=$CASE_DIR/download-env
+    TEST_CHECK_CONFIG_CAPTURE=$CASE_DIR/checked-config.json
     TEST_ASSET=sing-box-1.15.0-alpha.99-reF1nd-linux-amd64-musl.tar.gz
     SB_DOWNLOAD_MODE=direct
-    export SH_SINGBOX_HOME SH_SINGBOX_CONFIG TEST_EVENTS TEST_ASSET TEST_DOWNLOAD_ARGS TEST_DOWNLOAD_ENV SB_DOWNLOAD_MODE
+    export SH_SINGBOX_HOME SH_SINGBOX_CONFIG TEST_EVENTS TEST_ASSET TEST_DOWNLOAD_ARGS TEST_DOWNLOAD_ENV TEST_CHECK_CONFIG_CAPTURE SB_DOWNLOAD_MODE
     mkdir -p "$SH_SINGBOX_HOME/bin" "$SH_SINGBOX_HOME/scripts"
     cat > "$SH_SINGBOX_HOME/bin/sing-box" <<'SH'
 #!/bin/sh
@@ -124,6 +130,44 @@ SH
 assert_old() {
     cmp "$CASE_DIR/old-core" "$SH_SINGBOX_HOME/bin/sing-box" || fail 'existing core was replaced on failure'
     cmp "$CASE_DIR/original.json" "$SH_SINGBOX_CONFIG" || fail 'device configuration was modified'
+}
+
+# Mock only the central composition API, never duplicate its validation rules.
+# Separate central tests cover real wrapping/digests/locking. These fixtures
+# prove updater order, candidate selection and no writes to live JSON/sources.
+prepare_parts() {
+    prepare "$1"
+    PARTS_DIR=${SH_SINGBOX_CONFIG%.json}.d
+    mkdir -p "$PARTS_DIR" "$SH_SINGBOX_HOME/config"
+    cp "$SH_SINGBOX_CONFIG" "$PARTS_DIR/build.json"
+    for part in layout inbounds providers outbounds routing settings; do
+        printf '{"fixture":"%s"}\n' "$part" > "$PARTS_DIR/$part.json"
+    done
+    printf '{"managed":"policy"}\n' > "$SH_SINGBOX_HOME/config/config.template.json"
+    cat > "$SH_SINGBOX_HOME/scripts/config-parts.sh" <<'SH'
+#!/bin/sh
+set -eu
+parts=${SH_SINGBOX_CONFIG%.json}.d
+case "$1" in
+    fingerprint)
+        [ "${MOCK_PARTS_INVALID:-0}" -eq 0 ] || { echo 'Configuration generated output was manually edited; import it first.' >&2; exit 36; }
+        "$REAL_SHA" "$parts/"*.json "$SH_SINGBOX_CONFIG" "$SH_SINGBOX_HOME/config/config.template.json" | "$REAL_SHA" | awk '{print $1}' ;;
+    build)
+        printf 'parts:build\n' >> "$TEST_EVENTS"
+        [ "${MOCK_PARTS_BUILD_STATUS:-0}" -eq 0 ] || exit "$MOCK_PARTS_BUILD_STATUS"
+        cp "$parts/build.json" "$2"
+        chmod 0600 "$2" ;;
+    *) printf 'unexpected-parts:%s\n' "$*" >> "$TEST_EVENTS"; exit 66 ;;
+esac
+SH
+    chmod 0755 "$SH_SINGBOX_HOME/scripts/config-parts.sh"
+    cp -a "$PARTS_DIR" "$CASE_DIR/original-parts"
+}
+
+assert_parts_unchanged() {
+    diff -r "$CASE_DIR/original-parts" "$PARTS_DIR" || fail 'updater modified layout or editable sources'
+    cmp "$CASE_DIR/original.json" "$SH_SINGBOX_CONFIG" || fail 'updater modified generated runtime JSON'
+    ! grep -q '^unexpected-parts:' "$TEST_EVENTS" || fail 'updater attempted to render or commit configuration'
 }
 
 prepare custom_release
@@ -201,6 +245,111 @@ fi
 assert_old
 [ "$(grep -c '^restart:' "$TEST_EVENTS")" -eq 2 ] || fail 'previous core service was not restored'
 grep -Fq 'restart:sing-box version OLD-test-core' "$TEST_EVENTS" || fail 'rollback did not restart previous core'
+
+prepare_parts split_applied
+bash "$BASE/scripts/update-core.sh" v1.15.0-alpha.99-reF1nd > "$CASE_DIR/out" 2>&1 || {
+    cat "$CASE_DIR/out" >&2; fail 'applied split configuration could not update its core'
+}
+"$SH_SINGBOX_HOME/bin/sing-box" version | grep -Fq NEW-test-core || fail 'split installation did not receive candidate core'
+grep -Eq 'check:check -c .*/runtime/core-update\.[^/]+/config-candidate.json$' "$TEST_EVENTS" || fail 'new core did not validate the temporary composed config'
+cmp "$PARTS_DIR/build.json" "$TEST_CHECK_CONFIG_CAPTURE" || fail 'new core checked the wrong composed configuration'
+[ "$(grep -c '^parts:build' "$TEST_EVENTS")" -ge 3 ] || fail 'split sources were not rechecked before binary replacement'
+assert_parts_unchanged
+
+for scenario in missing_output pending invalid_manual broken_build; do
+    prepare_parts "split-$scenario"
+    case "$scenario" in
+        missing_output) rm "$SH_SINGBOX_CONFIG" ;;
+        pending)
+            jq '.unapplied = true' "$PARTS_DIR/build.json" > "$CASE_DIR/pending.json"
+            mv "$CASE_DIR/pending.json" "$PARTS_DIR/build.json"
+            cp "$PARTS_DIR/build.json" "$CASE_DIR/original-parts/build.json" ;;
+        invalid_manual) export MOCK_PARTS_INVALID=1 ;;
+        broken_build) export MOCK_PARTS_BUILD_STATUS=37 ;;
+    esac
+    if bash "$BASE/scripts/update-core.sh" v1.15.0-alpha.99-reF1nd > "$CASE_DIR/out" 2>&1; then
+        fail "split $scenario update unexpectedly succeeded"
+    fi
+    unset MOCK_PARTS_INVALID MOCK_PARTS_BUILD_STATUS
+    cmp "$CASE_DIR/old-core" "$SH_SINGBOX_HOME/bin/sing-box" || fail 'rejected split configuration changed the core'
+    diff -r "$CASE_DIR/original-parts" "$PARTS_DIR" || fail 'rejected split configuration changed sources'
+    if [ "$scenario" = missing_output ]; then
+        [ ! -e "$SH_SINGBOX_CONFIG" ] || fail 'core updater recreated missing generated output'
+    else
+        cmp "$CASE_DIR/original.json" "$SH_SINGBOX_CONFIG" || fail 'rejected split configuration changed generated output'
+    fi
+    if [ -e "$TEST_EVENTS" ]; then
+        ! grep -Eq '^(download:|restart:|check:|unexpected-parts:)' "$TEST_EVENTS" || fail 'unapplied/invalid configuration triggered core or network actions'
+    fi
+    case "$scenario" in
+        missing_output|pending) grep -Fq 'sbctl preflight' "$CASE_DIR/out" || fail 'unapplied parts error omitted recovery command' ;;
+    esac
+done
+
+prepare_parts split_bad_candidate
+if MOCK_CONFIG_STATUS=27 bash "$BASE/scripts/update-core.sh" v1.15.0-alpha.99-reF1nd > "$CASE_DIR/out" 2>&1; then
+    fail 'new core rejection of split candidate was accepted'
+fi
+assert_old
+assert_parts_unchanged
+! grep -q '^restart:' "$TEST_EVENTS" || fail 'rejected new core stopped/restarted existing service'
+
+prepare_parts split_concurrent_edit
+if MOCK_EDIT_PARTS_DURING_CHECK=1 bash "$BASE/scripts/update-core.sh" v1.15.0-alpha.99-reF1nd > "$CASE_DIR/out" 2>&1; then
+    fail 'source edit during candidate validation was ignored'
+fi
+assert_old
+printf '\n' >> "$CASE_DIR/original-parts/inbounds.json"
+assert_parts_unchanged
+grep -Fq 'changed during core validation' "$CASE_DIR/out" || fail 'concurrent edit error was unclear'
+! grep -q '^restart:' "$TEST_EVENTS" || fail 'concurrent user edit stopped/restarted existing service'
+
+prepare_parts split_rollback
+if MOCK_STOPPED=0 MOCK_RESTART_STATUS=4 bash "$BASE/scripts/update-core.sh" v1.15.0-alpha.99-reF1nd > "$CASE_DIR/out" 2>&1; then
+    fail 'failed split restart reported success'
+fi
+assert_old
+assert_parts_unchanged
+[ "$(grep -c '^restart:' "$TEST_EVENTS")" -eq 2 ] || fail 'split update did not recover the old core through its normal controller'
+
+# Run the same rollback through the real parts engine as well. Only the binary,
+# transport and service are mocked, so fingerprint/build/no-op render must agree
+# across the updater and both normal controller restart attempts.
+prepare real_parts_rollback
+mkdir -p "$SH_SINGBOX_HOME/config"
+cp "$BASE/config/config.template.json" "$SH_SINGBOX_HOME/config/config.template.json"
+cp "$BASE/config/config.template.json" "$SH_SINGBOX_CONFIG"
+cp "$SH_SINGBOX_CONFIG" "$CASE_DIR/original.json"
+for helper in runtime-paths.sh config-parts-lib.sh config-parts.sh; do
+    cp "$BASE/scripts/$helper" "$SH_SINGBOX_HOME/scripts/$helper"
+    chmod 0755 "$SH_SINGBOX_HOME/scripts/$helper"
+done
+cat > "$SH_SINGBOX_HOME/scripts/sbctl" <<'SH'
+#!/bin/sh
+set -eu
+case "$1" in
+    preflight) jq -e 'type == "object"' "$SH_SINGBOX_CONFIG" >/dev/null ;;
+    restart)
+        bash "$SH_SINGBOX_HOME/scripts/config-parts.sh" render
+        version=$("$SH_SINGBOX_HOME/bin/sing-box" version)
+        printf 'restart:%s\n' "$version" >> "$TEST_EVENTS"
+        case "$version" in *NEW*) exit "${MOCK_RESTART_STATUS:-0}" ;; esac ;;
+    *) exit 66 ;;
+esac
+SH
+chmod 0755 "$SH_SINGBOX_HOME/scripts/sbctl"
+bash "$SH_SINGBOX_HOME/scripts/config-parts.sh" init > "$CASE_DIR/init.log" 2>&1 || {
+    cat "$CASE_DIR/init.log" >&2; fail 'real parts engine failed to initialize fixture'
+}
+PARTS_DIR=${SH_SINGBOX_CONFIG%.json}.d
+cp -a "$PARTS_DIR" "$CASE_DIR/original-parts"
+if MOCK_STOPPED=0 MOCK_RESTART_STATUS=4 bash "$BASE/scripts/update-core.sh" v1.15.0-alpha.99-reF1nd > "$CASE_DIR/out" 2>&1; then
+    fail 'real-parts failed restart reported success'
+fi
+assert_old
+assert_parts_unchanged
+[ "$(grep -c '^restart:' "$TEST_EVENTS")" -eq 2 ] || { cat "$CASE_DIR/out" >&2; fail 'real parts rollback failed to restart old core'; }
+! grep -Fq 'Configuration changed during restart' "$CASE_DIR/out" || fail 'no-op real parts render unexpectedly changed state'
 
 prepare unsupported_arch
 if MOCK_ARCH=mips bash "$BASE/scripts/update-core.sh" > "$CASE_DIR/out" 2>&1; then

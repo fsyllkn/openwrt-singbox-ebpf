@@ -24,6 +24,7 @@ REPO_ROOT=$CASE_SOURCE
 . "$REPO_ROOT/scripts/runtime-paths.sh"
 sb_load_paths
 . "$DOWNLOAD_LIBRARY"
+. "$PARTS_LIBRARY"
 INSTALL_DIR=$SH_SINGBOX_HOME
 CONFIG=$SH_SINGBOX_CONFIG
 . "$DEPLOY_FUNCTION"
@@ -50,7 +51,8 @@ chmod 0755 "$TEST_DIR/bin/"*
 PATH=$TEST_DIR/bin:$PATH
 DEPLOY_FUNCTION=$TEST_DIR/deploy-function.sh
 DOWNLOAD_LIBRARY=$BASE/scripts/download.sh
-export PATH DEPLOY_FUNCTION DOWNLOAD_LIBRARY
+PARTS_LIBRARY=$BASE/scripts/config-parts-lib.sh
+export PATH DEPLOY_FUNCTION DOWNLOAD_LIBRARY PARTS_LIBRARY
 unset SH_SINGBOX_HOME SH_SINGBOX_CONFIG
 
 fail() { printf 'FAILED: %s\n' "$*" >&2; exit 1; }
@@ -197,7 +199,7 @@ cmp "$CASE_DIR/before/sing-box.init" "$CASE_INIT" || fail 'incomplete source mod
 cmp "$CASE_DIR/before/external-config.json" "$CASE_CONFIG" || fail 'incomplete source modified external config'
 [ ! -e "$MUTATION_LOG" ] || fail 'incomplete source invoked network/core/service command'
 
-for missing_helper in download.sh configure-download.sh; do
+for missing_helper in download.sh configure-download.sh config-parts-lib.sh config-parts.sh; do
     prepare_case "missing-$missing_helper"
     rm "$CASE_SOURCE/scripts/$missing_helper"
     if bash "$TEST_DIR/runner.sh" > "$CASE_DIR/output.log" 2>&1; then
@@ -208,6 +210,37 @@ for missing_helper in download.sh configure-download.sh; do
     cmp "$CASE_DIR/before/sing-box.init" "$CASE_INIT" || fail 'missing download helper modified init'
     cmp "$CASE_DIR/before/external-config.json" "$CASE_CONFIG" || fail 'missing download helper modified external config'
     [ ! -e "$MUTATION_LOG" ] || fail 'missing download helper invoked network/core/service command'
+done
+
+# Offline repair accepts missing generated JSON when a reserved parts path
+# exists. Do not validate/apply even broken sources; do not seed runtime caches.
+for shape in pending broken missing_output dangling_parts; do
+    prepare_case "parts-$shape"
+    parts_dir=${CASE_CONFIG%.json}.d
+    if [ "$shape" = dangling_parts ]; then
+        ln -s "$CASE_DIR/missing-parts" "$parts_dir"
+    else
+        mkdir "$parts_dir"
+        printf '{"source":"keep pending user edit"}\n' > "$parts_dir/inbounds.json"
+        printf 'invalid layout is repairable offline\n' > "$parts_dir/layout.json"
+        cp -a "$parts_dir" "$CASE_DIR/before-parts"
+    fi
+    if [ "$shape" = missing_output ] || [ "$shape" = dangling_parts ]; then rm "$CASE_CONFIG"; fi
+    SB_DOWNLOAD_MODE=invalid bash "$TEST_DIR/runner.sh" > "$CASE_DIR/output.log" 2>&1 || {
+        cat "$CASE_DIR/output.log" >&2; fail 'offline repair rejected reserved parts with missing/broken generated output'
+    }
+    if [ "$shape" = missing_output ] || [ "$shape" = dangling_parts ]; then
+        [ ! -e "$CASE_CONFIG" ] || fail 'offline repair rendered a missing generated output'
+    else
+        cmp "$CASE_DIR/before/external-config.json" "$CASE_CONFIG" || fail 'offline repair changed generated output'
+    fi
+    if [ "$shape" = dangling_parts ]; then
+        [ -L "$parts_dir" ] && [ ! -e "$parts_dir" ] || fail 'offline repair changed dangling parts link'
+    else
+        diff -r "$CASE_DIR/before-parts" "$parts_dir" || fail 'offline repair changed a user fragment or layout marker'
+    fi
+    [ ! -e "$CASE_HOME/providers/local.json" ] || fail 'offline repair initialized a dummy provider cache'
+    [ ! -e "$MUTATION_LOG" ] || fail 'offline parts repair invoked network/core/service'
 done
 
 prepare_case invalid_template

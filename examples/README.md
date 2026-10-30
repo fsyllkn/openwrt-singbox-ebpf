@@ -1,6 +1,52 @@
-# 局域网、远端私网与订阅示例
+# 分片配置、局域网与订阅示例
 
 本目录包含完整的 `lan-private-routing.json`、单独的 `http-provider.sample.json` 订阅片段，以及 `xboard.sample.json`、`local.sample.json` 两份本地 Provider 内容文件。完整配置使用本地 Provider，不会自动请求片段中的虚构订阅 URL。Provider 样例与运行文件的区别见 [Provider 说明](../providers/README.md)。
+
+## 分片配置
+
+新安装把可自定义内容保存在运行配置旁的分片目录中。默认完整运行配置为 `/opt/sing-box/config/config.json`，对应目录为 `/opt/sing-box/config/config.d/`；自定义配置路径以 `sbctl config` 显示的实际位置为准。完整 JSON 由工具生成，分片模式下应编辑源分片。
+
+| 公开格式样例 | 设备上的源文件 | 可修改内容 |
+| --- | --- | --- |
+| `config-providers.sample.json` | `providers.json` | Provider 定义、订阅与本地节点文件引用 |
+| `config-inbounds.sample.json` | `inbounds.json` | eBPF 设置、UID、LAN 监听地址、端口与认证 |
+| `config-outbounds.sample.json` | `outbounds.json` | 节点和选择组；保留 `proxy`、`ai`、`direct` 标签约束 |
+| `config-routing.sample.json` | `routing.json` | 有明确目的/源 IP、CIDR 或进程条件的路由例外，默认为空 |
+| `config-settings.sample.json` | `settings.json` | 日志、控制 API、缓存、HTTP 客户端和其他非策略设置 |
+
+这些文件是原生 JSON 片段，不是独立的完整运行配置。例如 `inbounds.json` 顶层只有 `{"inbounds": [...]}`，`routing.json` 顶层只有 `{"route": {"rules": [...]}}`。DNS、固定路由和规则集由安装目录的 `config/config.template.json` 维护；不要把 `dns`、`route` 或其他分片数组放进 `settings.json` 试图覆盖它们。
+
+通过 `sb` 菜单 **9** 编辑对应分片，再运行 `sbctl preflight` 和 `sbctl restart`。LAN、网关和 UID 工具会回写 `inbounds.json`，重新生成后设置仍然保留。隐私策略操作在此模式下刷新固定策略，不重写用户分片；`layout.json` 由工具维护。
+
+已有单文件安装仍按原配置工作，可用 `sbctl split-config` 显式迁移。只有 DNS、固定路由和规则顺序兼容且能无损重组时才会切换；自定义解析器或复杂规则不兼容时，工具保留原配置。需要继续自定义 DNS 时可保留单文件模式；已启用分片的配置可用 `sbctl single-config` 显式切回。不要直接编辑生成 JSON 或通过删除分片目录绕过一致性检查。
+
+### 指定私网目的地址经过指定出站
+
+在 `outbounds.json` 定义自己的静态 `remote-office` 出站，然后把以下内容写入设备上的 `routing.json`。地址均为虚构示例，需替换为实际目标：
+
+```json
+{
+  "route": {
+    "rules": [
+      {
+        "ip_cidr": ["10.77.50.10/32", "10.88.60.0/24"],
+        "action": "route",
+        "outbound": "remote-office"
+      }
+    ]
+  }
+}
+```
+
+规则按用户填写的次序插在固定 DNS 劫持、协议识别、STUN/DTLS 拒绝三条规则之后，在其他固定路由和通用私网直连规则之前。引用的出站必须存在，且远端出口实际能够访问目标网络；不要把动态 Provider 节点标签直接当作尚未加载的静态出站。需要从 Provider 中选择时，可以建立具有安全静态初始成员的命名选择组，再由面板选择真实节点。
+
+目的 CIDR 规则只决定业务连接的出站，不会自动添加企业内网 DNS。需要自定义解析器或仅按域名匹配的 DNS/路由策略时，第一版分片模式无法无损表达，应保留单文件配置。
+
+### DNS 与代理出口的边界
+
+固定 AI 域名规则使 AI DNS 和业务连接都引用 `ai`，普通代理 DNS 引用 `proxy`。这表示配置使用相同的出站组，不保证每次查询、缓存命中和后续连接使用完全相同的节点、出口 IP 或 ASN。公共 DoH 经过代理传输，也不等于解析服务位于代理节点本机；自定义私网例外不会改变其解析器。
+
+当前策略仍有明确的私网、国内和管理进程直连规则。AAAA 空答复、STUN/DTLS 拒绝也不代表接管所有客户端 IPv6、应用自带加密 DNS 或未经过网关的流量；应在实际设备和客户端验证需要的行为。
 
 ## 局域网认证代理与远端私网路由
 
@@ -41,7 +87,7 @@ sbctl preflight
 sbctl restart
 ```
 
-导入会执行内核配置校验并备份现有配置，不自动重启；导入成功不代表监听地址已分配给本机。若仍使用文档地址，后续监听地址预检和启动会拒绝未分配的地址，避免把示例地址当成本机地址。
+导入会校验并备份现有配置，不自动重启。单文件模式的内核校验不等于实际监听检查；分片模式还要求固定策略兼容，并对重组结果执行预检后回写源文件。请先修改文档地址：分片导入、后续预检或启动会拒绝未分配给本机的监听地址。
 
 透明 LAN 网关的接口和源网段需要单独通过 `sb` 菜单设置。修改 `mixed.listen` 不会自动改变网关源网段，也不等于已经接管 LAN 客户端的 IPv6 或 DNS。
 
@@ -50,7 +96,7 @@ sbctl restart
 `http-provider.sample.json` 仅演示顶层 `providers` 字段中的一项，不能直接交给 `sbctl import-config` 当作完整配置运行。
 
 1. 将 `https://example.invalid/subscription/REPLACE_WITH_YOUR_SUBSCRIPTION` 换成自己的实际订阅 URL。
-2. 在设备上的完整配置中，用片段的远程 Provider 替换原有 `tag: "xboard"` 的本地 Provider，保留其他 Provider。
+2. 在设备上的 `providers.json` 分片或旧版完整配置中，用片段的远程 Provider 替换原有 `tag: "xboard"` 的本地 Provider，保留其他 Provider。
 3. 检查 `path` 和订阅下载路径，再校验、重启，并在控制面板中选择实际节点。
 
 片段在 `http_client.headers` 中设置 `User-Agent: clash.meta`，省略 `detour`，使用核心默认拨号器直连下载订阅；它仅影响订阅请求。需要通过代理下载时，再填已配置且实际可用的出站标签，不能依赖尚未配置的占位代理，也不要填指向空 `direct` 出站的标签。

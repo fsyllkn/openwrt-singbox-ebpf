@@ -14,6 +14,14 @@ fi
 }
 . "$MENU_PATHS"
 sb_load_paths || exit 1
+MENU_PARTS=$(dirname -- "$MENU_PATHS")/config-parts-lib.sh
+[ -r "$MENU_PARTS" ] || {
+    echo 'Missing config-parts-lib.sh; deploy the complete updated scripts directory.' >&2
+    exit 1
+}
+. "$MENU_PARTS"
+SB_CONFIG_PARTS_TOOL=$(dirname -- "$MENU_PATHS")/config-parts.sh
+export SB_CONFIG_PARTS_TOOL
 SB_HOME=$SH_SINGBOX_HOME
 GATEWAY=$SB_HOME/scripts/gateway.sh
 CONFIG=$SH_SINGBOX_CONFIG
@@ -106,6 +114,11 @@ backup_config() {
     say "Backup: $dest"
 }
 edit_config() {
+    root_only || return
+    if sb_parts_active; then
+        edit_config_part
+        return
+    fi
     say "Editing service configuration: $CONFIG"
     backup_config || return
     vi "$CONFIG" || return
@@ -116,6 +129,67 @@ edit_config() {
         }
     fi
     say 'Config saved. Run menu option 8 to validate before any restart.'
+}
+edit_config_part() (
+    parts_directory=$(sb_parts_dir)
+    say "自定义配置目录：$parts_directory"
+    say '1) providers：订阅与本地 Provider 定义'
+    say '2) inbounds：LAN 监听、认证与 eBPF 设置'
+    say '3) outbounds：节点与 proxy/ai 分组'
+    say '4) routing：指定 IP/网段及进程的路由例外'
+    say '5) settings：面板、日志等其他设置'
+    say '6) 查看运行配置路径与状态'
+    say '0) 返回'
+    printf '选择要编辑的部分：'
+    IFS= read -r part_choice || exit 1
+    case "$part_choice" in
+        1) part_name=providers ;;
+        2) part_name=inbounds ;;
+        3) part_name=outbounds ;;
+        4) part_name=routing ;;
+        5) part_name=settings ;;
+        6) run_sbctl config; exit $? ;;
+        0|'') exit 0 ;;
+        *) say '无效选项。'; exit 1 ;;
+    esac
+    part_source=$parts_directory/$part_name.json
+    [ -f "$part_source" ] || { say "缺少源文件：$part_source，请从备份恢复。"; exit 1; }
+    part_expected=$(sb_parts_fingerprint) || exit 1
+    mkdir -p "$SB_HOME/runtime" || exit 1
+    part_stage=$(mktemp "$SB_HOME/runtime/.config-part-edit.XXXXXX") || exit 1
+    trap '[ -z "$part_stage" ] || rm -f "$part_stage"' EXIT HUP INT TERM
+    cp "$part_source" "$part_stage" && chmod 0600 "$part_stage" || exit 1
+    say "编辑 $part_name；保存后会组装并预检，通过才更新配置，不会重启服务。"
+    vi "$part_stage" || exit 1
+    chmod 0600 "$part_stage" || exit 1
+    if ! SB_CONFIG_PARTS_EXPECTED=$part_expected sb_parts_set "$part_name" "$part_stage"; then
+        part_rejected=$SB_HOME/runtime/$part_name.rejected.$(date +%Y%m%d-%H%M%S).$$.json
+        if mv "$part_stage" "$part_rejected"; then
+            part_stage=
+            say "未通过校验，原配置保持不变。编辑内容保存在：$part_rejected"
+        else
+            trap - EXIT HUP INT TERM
+            say "未通过校验，编辑内容仍在：$part_stage"
+        fi
+        exit 1
+    fi
+    say '源文件和运行配置已更新；需要应用到服务时，选择菜单 3 重启。'
+)
+manage_config_parts() {
+    root_only || return
+    run_sbctl config || true
+    say '1) 将兼容的单文件配置无损拆分'
+    say '2) 保留完整运行 JSON，归档分文件并返回单文件模式'
+    say '0) 返回'
+    say '这两项都不会重启服务；自定义 DNS 或规则顺序不能无损拆分时会保留原配置。'
+    printf '选择：'
+    IFS= read -r layout_choice || return
+    case "$layout_choice" in
+        1) run_sbctl split-config ;;
+        2) run_sbctl single-config ;;
+        0|'') return 0 ;;
+        *) say '无效选项。'; return 1 ;;
+    esac
 }
 install_core() {
     root_only || return
@@ -508,6 +582,7 @@ show_menu() {
     say '  【维护】'
     say '  23) 卸载服务（保留配置）'
     say '  24) 设置安装/更新下载代理'
+    say '  25) 配置分文件模式 / 迁移'
     say '   0) 退出'
 }
 while :; do
@@ -549,6 +624,7 @@ while :; do
                 fi
             fi ;;
         24) configure_download_proxy ;;
+        25) manage_config_parts ;;
         0|q|Q) break ;;
         *) say 'Unknown option.' ;;
     esac

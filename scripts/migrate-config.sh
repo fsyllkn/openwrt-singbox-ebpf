@@ -4,8 +4,11 @@
 set -euo pipefail
 
 SCRIPT_FILE="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
-. "$(dirname "$SCRIPT_FILE")/runtime-paths.sh"
+SCRIPT_DIR="$(dirname "$SCRIPT_FILE")"
+. "$SCRIPT_DIR/runtime-paths.sh"
 sb_load_paths || exit 1
+. "$SCRIPT_DIR/config-parts-lib.sh"
+SB_CONFIG_PARTS_TOOL="${SB_CONFIG_PARTS_TOOL:-$SCRIPT_DIR/config-parts.sh}"
 umask 077
 
 CONFIG="${1:-$SH_SINGBOX_CONFIG}"
@@ -15,6 +18,14 @@ BIN="$ROOT/bin/sing-box"
 fail() { printf '[ERROR] %s\n' "$*" >&2; exit 1; }
 info() { printf '[sing-box] %s\n' "$*"; }
 [ "$(id -u)" -eq 0 ] || fail 'Run as root.'
+# A generated config is never the input to the legacy DNS/block migration.
+# Check both its configured entry path and an explicit alias to the same file.
+if sb_parts_active && { [ "$CONFIG" = "$SH_SINGBOX_CONFIG" ] || [ "$CONFIG" -ef "$SH_SINGBOX_CONFIG" ]; }; then
+    fail 'DNS/routing is project-managed in section mode. Edit the section files or explicitly use sbctl single-config before this legacy migration.'
+fi
+if [ "$CONFIG" != "$SH_SINGBOX_CONFIG" ] && (SH_SINGBOX_CONFIG="$CONFIG"; sb_parts_active); then
+    fail 'The selected configuration has managed sections; legacy migration will not edit generated output.'
+fi
 [ -f "$CONFIG" ] || fail "Configuration not found: $CONFIG"
 CONFIG="$(readlink -f "$CONFIG")" || fail 'Cannot resolve the active config target.'
 [ -x "$BIN" ] || fail "Kernel not found: $BIN"

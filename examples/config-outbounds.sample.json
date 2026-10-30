@@ -1,0 +1,37 @@
+{
+  "outbounds": [
+    {
+      "type": "selector",
+      "tag": "proxy",
+      "outbounds": [
+        "configure-your-proxy"
+      ],
+      "default": "configure-your-proxy",
+      "interrupt_exist_connections": true,
+      "providers": [
+        "xboard",
+        "local"
+      ]
+    },
+    {
+      "type": "selector",
+      "tag": "ai",
+      "outbounds": [
+        "proxy"
+      ],
+      "default": "proxy",
+      "interrupt_exist_connections": true
+    },
+    {
+      "type": "socks",
+      "tag": "configure-your-proxy",
+      "server": "127.0.0.1",
+      "server_port": 1080,
+      "version": "5"
+    },
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ]
+}

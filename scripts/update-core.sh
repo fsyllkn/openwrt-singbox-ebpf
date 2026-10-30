@@ -10,12 +10,17 @@ SCRIPT_FILE="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BAS
 . "$(dirname "$SCRIPT_FILE")/runtime-paths.sh"
 sb_load_paths || exit 1
 . "$(dirname "$SCRIPT_FILE")/download.sh"
+. "$(dirname "$SCRIPT_FILE")/config-parts-lib.sh"
 
 SERVICE_DIR="$SH_SINGBOX_HOME"
 BIN_DIR="$SERVICE_DIR/bin"
 BIN="$BIN_DIR/sing-box"
 RUNTIME_DIR="$SERVICE_DIR/runtime"
 TMP_DIR=
+UPDATE_CONFIG=
+UPDATE_CONFIG_MODE=
+UPDATE_CONFIG_FINGERPRINT=
+PARTS_TOOL=${SB_CONFIG_PARTS_TOOL:-$SERVICE_DIR/scripts/config-parts.sh}
 
 ok()   { echo -e "\033[32m✓\033[0m $*"; }
 err()  { echo -e "\033[31m✗\033[0m $*" >&2; }
@@ -118,19 +123,77 @@ restart_core_service() {
 }
 
 check_candidate_config() {
-    local candidate="$1" max_seconds="${SB_CHECK_TIMEOUT:-90}"
+    local candidate="$1" config="$2" max_seconds="${SB_CHECK_TIMEOUT:-90}"
     [[ "$max_seconds" =~ ^[0-9]+$ ]] && [ "$max_seconds" -gt 0 ] || {
         err "SB_CHECK_TIMEOUT must be a positive integer"
         return 1
     }
     if command -v timeout >/dev/null 2>&1; then
-        (cd "$SERVICE_DIR" && timeout "$max_seconds" "$candidate" check -c "$SH_SINGBOX_CONFIG")
+        (cd "$SERVICE_DIR" && timeout "$max_seconds" "$candidate" check -c "$config")
     elif command -v busybox >/dev/null 2>&1 && busybox --list 2>/dev/null | grep -qx timeout; then
-        (cd "$SERVICE_DIR" && busybox timeout "$max_seconds" "$candidate" check -c "$SH_SINGBOX_CONFIG")
+        (cd "$SERVICE_DIR" && busybox timeout "$max_seconds" "$candidate" check -c "$config")
     else
         err "A timeout utility is required to validate an existing configuration before a core update"
         return 1
     fi
+}
+
+# Build without render/preflight: the currently installed core must never
+# publish a generated configuration on behalf of an unverified new core.
+# Require an applied draft so normal restart and binary rollback use the same
+# effective configuration; users can apply it explicitly with sbctl preflight.
+stage_update_config() {
+    local before after
+    UPDATE_CONFIG=$SH_SINGBOX_CONFIG
+    if sb_parts_active; then
+        UPDATE_CONFIG_MODE=parts
+        [ -f "$SH_SINGBOX_CONFIG" ] && [ -r "$SH_SINGBOX_CONFIG" ] || {
+            err "Generated configuration is missing or unreadable. Run 'sbctl preflight' with the current core to rebuild it before updating the core."
+            return 1
+        }
+        [ -x "$PARTS_TOOL" ] || { err "Missing configuration-parts tool: $PARTS_TOOL; update the installed scripts first"; return 1; }
+        before=$("$PARTS_TOOL" fingerprint) || return 1
+        UPDATE_CONFIG=$TMP_DIR/config-candidate.json
+        "$PARTS_TOOL" build "$UPDATE_CONFIG" || return 1
+        jq -e -s 'length == 2 and .[0] == .[1]' "$SH_SINGBOX_CONFIG" "$UPDATE_CONFIG" >/dev/null || {
+            err "Configuration sources contain an unapplied draft or policy change. Run 'sbctl preflight' with the current core before updating the core."
+            return 1
+        }
+        after=$("$PARTS_TOOL" fingerprint) || return 1
+        [ "$before" = "$after" ] || { err "Configuration changed while staging the core update; retry after finishing the edit"; return 1; }
+        UPDATE_CONFIG_FINGERPRINT=$after
+    elif [ -e "$SH_SINGBOX_CONFIG" ] || [ -L "$SH_SINGBOX_CONFIG" ]; then
+        UPDATE_CONFIG_MODE=legacy
+        [ -f "$SH_SINGBOX_CONFIG" ] && [ -r "$SH_SINGBOX_CONFIG" ] || {
+            err "Existing configuration is not a readable file: $SH_SINGBOX_CONFIG"
+            return 1
+        }
+        UPDATE_CONFIG_FINGERPRINT=$(cksum < "$SH_SINGBOX_CONFIG") || return 1
+    else
+        UPDATE_CONFIG_MODE=fresh
+        UPDATE_CONFIG=
+    fi
+}
+
+verify_update_config_unchanged() {
+    local current
+    case "$UPDATE_CONFIG_MODE" in
+        parts)
+            sb_parts_active || return 1
+            current=$("$PARTS_TOOL" fingerprint) || return 1
+            [ "$current" = "$UPDATE_CONFIG_FINGERPRINT" ] || return 1
+            "$PARTS_TOOL" build "$TMP_DIR/config-recheck.json" || return 1
+            jq -e -s 'length == 2 and .[0] == .[1]' "$UPDATE_CONFIG" "$TMP_DIR/config-recheck.json" >/dev/null || return 1
+            current=$("$PARTS_TOOL" fingerprint) || return 1
+            [ "$current" = "$UPDATE_CONFIG_FINGERPRINT" ] ;;
+        legacy)
+            ! sb_parts_active && [ -f "$SH_SINGBOX_CONFIG" ] || return 1
+            current=$(cksum < "$SH_SINGBOX_CONFIG") || return 1
+            [ "$current" = "$UPDATE_CONFIG_FINGERPRINT" ] ;;
+        fresh)
+            ! sb_parts_active && [ ! -e "$SH_SINGBOX_CONFIG" ] && [ ! -L "$SH_SINGBOX_CONFIG" ] ;;
+        *) return 1 ;;
+    esac
 }
 
 # -----------------------------------------------------------------------------
@@ -160,6 +223,7 @@ do_update() {
     mkdir -p "$RUNTIME_DIR"
     TMP_DIR="$(mktemp -d "$RUNTIME_DIR/core-update.XXXXXX")" || die "Cannot create core staging directory"
     trap 'rm -rf "$TMP_DIR"' EXIT
+    stage_update_config || die "Configuration preparation failed; current core and service are unchanged"
     local expected_hash actual_hash
     expected_hash="$(release_hash "$version" "$filename" "$arch" "$libc")" || return 1
     [[ "$expected_hash" =~ ^[0-9a-f]{64}$ ]] || die "No verified checksum for $filename"
@@ -193,14 +257,15 @@ do_update() {
     new_ver="$("$candidate" version 2>/dev/null | head -n 1)" || die "New sing-box binary failed self-test"
     ok "New core test passed: $new_ver"
 
-    if [ -f "$SH_SINGBOX_CONFIG" ]; then
+    if [ -n "$UPDATE_CONFIG" ]; then
         info "Checking existing configuration with the new core: $SH_SINGBOX_CONFIG"
-        check_candidate_config "$candidate" > "$TMP_DIR/config-check.log" 2>&1 || {
+        check_candidate_config "$candidate" "$UPDATE_CONFIG" > "$TMP_DIR/config-check.log" 2>&1 || {
             cp "$TMP_DIR/config-check.log" "$RUNTIME_DIR/core-update-check.log"
             chmod 0600 "$RUNTIME_DIR/core-update-check.log"
             die "New core rejects the existing configuration; current core and service are unchanged. Review $RUNTIME_DIR/core-update-check.log"
         }
     fi
+    verify_update_config_unchanged || die "Configuration changed during core validation; finish the edit and retry. Current core and service are unchanged."
 
     # Check if sing-box is currently running
     local was_running=0
@@ -221,9 +286,12 @@ do_update() {
         previous="$(mktemp "$BIN_DIR/.sing-box.previous.XXXXXX")" || die "Cannot back up existing core"
         cp -p "$BIN" "$previous" || die "Cannot back up existing core"
     fi
+    if ! verify_update_config_unchanged; then
+        [ -z "$previous" ] || rm -f "$previous"
+        die "Configuration changed before core replacement; finish the edit and retry. Current core and service are unchanged."
+    fi
     mv -f "$candidate" "$BIN"
     chmod 0755 "$BIN"
-    rm -rf "$TMP_DIR"
     rm -f "$RUNTIME_DIR/config.valid" 2>/dev/null || true
     ok "Core binary replaced at $BIN"
 
@@ -232,6 +300,9 @@ do_update() {
         if ! restart_core_service "$init_sys"; then
             if [ -n "$previous" ]; then
                 mv -f "$previous" "$BIN"
+                if ! verify_update_config_unchanged; then
+                    warn "Configuration changed during restart. User sources and generated output were preserved; recovery must pass the previous core's normal preparation and validation."
+                fi
                 warn "New core restart failed; previous binary restored. Attempting to restore service."
                 restart_core_service "$init_sys" || warn "Previous core restored, but service recovery failed; inspect service logs."
             fi

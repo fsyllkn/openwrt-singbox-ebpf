@@ -5,8 +5,8 @@ BASE=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 TMP=$(mktemp -d /tmp/sb-menu-lan.XXXXXX)
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 mkdir -p "$TMP/bin" "$TMP/checkout/scripts" "$TMP/home/scripts" "$TMP/home/runtime" "$TMP/custom config"
-cp "$BASE/scripts/runtime-paths.sh" "$TMP/checkout/scripts/"
-cp "$BASE/scripts/runtime-paths.sh" "$TMP/home/scripts/"
+cp "$BASE/scripts/runtime-paths.sh" "$BASE/scripts/config-parts-lib.sh" "$BASE/scripts/config-parts.sh" "$TMP/checkout/scripts/"
+cp "$BASE/scripts/runtime-paths.sh" "$BASE/scripts/config-parts-lib.sh" "$BASE/scripts/config-parts.sh" "$TMP/home/scripts/"
 : > "$TMP/checkout/install.sh"
 
 # Keep the production path setup/functions intact. Omit only the OS guard and

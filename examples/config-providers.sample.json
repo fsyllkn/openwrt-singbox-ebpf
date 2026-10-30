@@ -1,0 +1,20 @@
+{
+  "providers": [
+    {
+      "type": "local",
+      "tag": "xboard",
+      "path": "providers/xboard.json",
+      "health_check": {
+        "enabled": false
+      }
+    },
+    {
+      "type": "local",
+      "tag": "local",
+      "path": "providers/local.json",
+      "health_check": {
+        "enabled": false
+      }
+    }
+  ]
+}

@@ -4,8 +4,11 @@
 set -euo pipefail
 
 SCRIPT_FILE="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
-. "$(dirname "$SCRIPT_FILE")/runtime-paths.sh"
+SCRIPT_DIR="$(dirname "$SCRIPT_FILE")"
+. "$SCRIPT_DIR/runtime-paths.sh"
 sb_load_paths || exit 1
+. "$SCRIPT_DIR/config-parts-lib.sh"
+SB_CONFIG_PARTS_TOOL="${SB_CONFIG_PARTS_TOOL:-$SCRIPT_DIR/config-parts.sh}"
 umask 077
 
 ROOT="$SH_SINGBOX_HOME"
@@ -17,10 +20,18 @@ die() { printf '[ERROR] %s\n' "$*" >&2; exit 1; }
 info() { printf '[sing-box] %s\n' "$*"; }
 [ "$(id -u)" -eq 0 ] || die 'Run as root'
 [ "${1:-}" = apply ] || die 'Usage: apply-pc-privacy.sh apply'
-[ -f "$CONFIG" ] && [ -f "$POLICY" ] || die 'Missing installed config or new template (reinstall from updated openwrt source)'
-CONFIG="$(readlink -f "$CONFIG")" || die 'Cannot resolve the active config target.'
+[ -f "$POLICY" ] || die 'Missing installed policy template (reinstall from updated source)'
 [ -x "$BIN" ] || die 'Missing running sing-box kernel'
 command -v jq >/dev/null 2>&1 || die 'Install jq first'
+if sb_parts_active; then
+    sb_parts_prepare || die 'Cannot refresh managed policy; correct the section files first.'
+    info 'Project-managed DNS/routing policy refreshed from the installed template.'
+    info 'Custom sections remain the source for providers, inbounds, outbounds, routing exceptions and settings.'
+    info 'No restart performed. Review sbctl config, then start/restart when ready.'
+    exit 0
+fi
+[ -f "$CONFIG" ] || die 'Missing installed configuration'
+CONFIG="$(readlink -f "$CONFIG")" || die 'Cannot resolve the active config target.'
 # Do not touch complex legacy configurations until the earlier migration passed.
 if jq -e '
   any(.outbounds[]?; .type == "dns" or .type == "block")

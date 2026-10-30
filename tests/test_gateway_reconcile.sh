@@ -349,4 +349,70 @@ mv "$TMP/home/runtime/gateway.json" "$TMP/home/runtime/settings.bak"
 echo '15360: from all fwmark 0x1536 lookup 53136' > "$TMP/state/rules"
 gw cleanup
 [ "$(rule_count)" -eq 1 ]
+
+echo 'TEST managed gateway edits persist in source and failed commits retain settings'
+reset
+mkdir -p "$SH_SINGBOX_HOME/scripts" "$SH_SINGBOX_HOME/providers"
+cp "$BASE/config/config.template.json" "$SH_SINGBOX_HOME/config/config.template.json"
+cp "$BASE/examples/xboard.sample.json" "$SH_SINGBOX_HOME/providers/xboard.json"
+cp "$BASE/examples/local.sample.json" "$SH_SINGBOX_HOME/providers/local.json"
+cat > "$SH_SINGBOX_HOME/scripts/sbctl" <<'SH'
+#!/bin/sh
+set -eu
+[ "$*" = preflight ] || exit 64
+[ "${MOCK_PARTS_PREFLIGHT_FAIL:-0}" = 0 ] || { echo 'mock device preflight rejected candidate' >&2; exit 47; }
+jq -e 'type=="object" and (.inbounds|type=="array")' "$SH_SINGBOX_CONFIG" >/dev/null
+SH
+chmod 0755 "$SH_SINGBOX_HOME/scripts/sbctl"
+export SB_CONFIG_PARTS_TOOL="$BASE/scripts/config-parts.sh"
+jq '
+ .outbounds += [{"type":"socks","tag":"remote-office","server":"192.0.2.20","server_port":1080}]
+ | .route.rules=(.route.rules[:3]
+      + [{"ip_cidr":["10.77.50.10/32"],"action":"route","outbound":"remote-office"}]
+      + .route.rules[3:])
+' "$BASE/config/config.template.json" > "$SH_SINGBOX_CONFIG"
+bash "$SB_CONFIG_PARTS_TOOL" init > "$TMP/parts-init.log" 2>&1
+PARTS_DIR="${SH_SINGBOX_CONFIG%.json}.d"
+cp "$SH_SINGBOX_CONFIG" "$TMP/parts-generated-before.json"
+cp "$PARTS_DIR/inbounds.json" "$TMP/parts-inbounds-before.json"
+cp "$PARTS_DIR/routing.json" "$TMP/parts-routing-before.json"
+if (export MOCK_PARTS_PREFLIGHT_FAIL=1; gw configure br-edge.42 10.23.40.0/23) > "$TMP/parts-rejected.log" 2>&1; then
+  echo 'Gateway ignored failed managed inbound validation' >&2; exit 1
+fi
+cmp "$SH_SINGBOX_CONFIG" "$TMP/parts-generated-before.json"
+cmp "$PARTS_DIR/inbounds.json" "$TMP/parts-inbounds-before.json"
+[ ! -f "$SH_SINGBOX_HOME/runtime/gateway.json" ]
+gw configure br-edge.42 10.23.40.0/23
+jq -e 'any(.inbounds[]; .tag=="lan-tproxy" and .type=="tproxy" and .listen_port==1536)' "$PARTS_DIR/inbounds.json" >/dev/null
+bash "$SB_CONFIG_PARTS_TOOL" render > "$TMP/parts-render.log" 2>&1
+jq -e --slurpfile source "$PARTS_DIR/inbounds.json" '.inbounds==$source[0].inbounds' "$SH_SINGBOX_CONFIG" >/dev/null
+cmp "$PARTS_DIR/routing.json" "$TMP/parts-routing-before.json"
+gw apply
+active
+
+echo 'TEST broken source blocks apply but cannot block owned network cleanup'
+cp "$PARTS_DIR/inbounds.json" "$TMP/parts-inbounds-valid.json"
+cp "$SH_SINGBOX_CONFIG" "$TMP/parts-generated-valid.json"
+cp "$SH_SINGBOX_HOME/runtime/gateway.json" "$TMP/parts-settings-valid.json"
+printf '{\n' > "$PARTS_DIR/inbounds.json"
+if gw apply > "$TMP/parts-invalid-apply.log" 2>&1; then
+  echo 'Gateway applied stale output despite malformed managed source' >&2; exit 1
+fi
+active
+gw status > "$TMP/parts-status.log" 2>&1
+gw cleanup
+[ "$(rule_count)" -eq 0 ] && [ ! -s "$TMP/state/routes" ] && [ ! -f "$TMP/state/nft" ]
+[ "$(cat "$TMP/forward")" = 0 ]
+if gw disable > "$TMP/parts-invalid-disable.log" 2>&1; then
+  echo 'Gateway silently removed managed configuration with malformed source' >&2; exit 1
+fi
+cmp "$SH_SINGBOX_CONFIG" "$TMP/parts-generated-valid.json"
+cmp "$SH_SINGBOX_HOME/runtime/gateway.json" "$TMP/parts-settings-valid.json"
+cp "$TMP/parts-inbounds-valid.json" "$PARTS_DIR/inbounds.json"
+gw disable
+bash "$SB_CONFIG_PARTS_TOOL" render > "$TMP/parts-disable-render.log" 2>&1
+jq -e 'all(.inbounds[]; .tag!="lan-tproxy")' "$PARTS_DIR/inbounds.json" >/dev/null
+jq -e 'all(.inbounds[]; .tag!="lan-tproxy")' "$SH_SINGBOX_CONFIG" >/dev/null
+cmp "$PARTS_DIR/routing.json" "$TMP/parts-routing-before.json"
+[ ! -f "$SH_SINGBOX_HOME/runtime/gateway.json" ]
 echo 'Gateway ownership and stale-rule recovery tests passed.'

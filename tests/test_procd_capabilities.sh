@@ -116,6 +116,10 @@ for helper in core sbctl dns gateway; do
     cat > "$TEST_DIR/home/$helper" <<'SH'
 #!/bin/sh
 printf '%s:%s\n' "${0##*/}" "$*" >> "$EVENTS"
+if [ "${0##*/}" = sbctl ]; then
+    [ "${MOCK_PREFLIGHT_STATUS:-0}" -eq 0 ] || exit "$MOCK_PREFLIGHT_STATUS"
+    if [ "${MOCK_GENERATE_CONFIG:-0}" -eq 1 ]; then printf '{}\n' > "$TEST_CONFIG"; fi
+fi
 SH
     chmod 0755 "$TEST_DIR/home/$helper"
 done
@@ -140,4 +144,37 @@ cmp "$TEST_DIR/expected" "$EVENTS" || fail 'network setup or core launch occurre
 MOCK_AUTO_DNS=0 start_service > "$TEST_DIR/no-dns.log"
 printf 'sbctl:preflight\ncgroup\ngateway:apply\nprocd-open\n' > "$TEST_DIR/expected"
 cmp "$TEST_DIR/expected" "$EVENTS" || fail 'auto_dns=0 did not skip DNS setup'
+
+# Preflight may regenerate a missing output from existing parts. The service
+# must wait for this before its existence check, cgroup reads or network setup.
+TEST_CONFIG=$CONFIG; export TEST_CONFIG
+rm "$CONFIG"
+: > "$EVENTS"
+MOCK_GENERATE_CONFIG=1 start_service > "$TEST_DIR/rebuilt.log"
+[ -f "$CONFIG" ] || fail 'startup did not let preflight rebuild generated JSON'
+printf 'sbctl:preflight\ncgroup\ndns:setup\ngateway:apply\nprocd-open\n' > "$TEST_DIR/expected"
+cmp "$TEST_DIR/expected" "$EVENTS" || fail 'generated configuration was inspected or service launched before preparation'
+
+# Both direct /etc/init.d reload and system-manager reloads must refuse invalid
+# sources without signaling an already-running core.
+procd_send_signal() { printf 'signal:%s\n' "$*" >> "$EVENTS"; }
+: > "$EVENTS"
+reload_service > "$TEST_DIR/reload.log"
+printf 'sbctl:preflight\ncgroup\nsignal:sing-box\n' > "$TEST_DIR/expected"
+cmp "$TEST_DIR/expected" "$EVENTS" || fail 'reload did not validate before signaling'
+: > "$EVENTS"
+if MOCK_PREFLIGHT_STATUS=29 reload_service > "$TEST_DIR/invalid-reload.log" 2>&1; then
+    fail 'invalid draft was reloaded'
+fi
+printf 'sbctl:preflight\n' > "$TEST_DIR/expected"
+cmp "$TEST_DIR/expected" "$EVENTS" || fail 'invalid draft signaled the running core'
+
+# Stop and recovery remain available with missing JSON and invalid parts.
+rm "$CONFIG"
+mkdir "${CONFIG%.json}.d"
+printf 'broken user draft\n' > "${CONFIG%.json}.d/inbounds.json"
+: > "$EVENTS"
+MOCK_PREFLIGHT_STATUS=29 stop_service > "$TEST_DIR/stop-invalid.log"
+printf 'gateway:cleanup\ndns:restore\n' > "$TEST_DIR/expected"
+cmp "$TEST_DIR/expected" "$EVENTS" || fail 'stop attempted configuration preparation'
 echo 'Procd firmware capability and UCI flag tests passed.'

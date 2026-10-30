@@ -169,20 +169,20 @@ start_service() {
         echo "sing-box binary not found or not executable: $BIN" >&2
         return 1
     }
-    [ -f "$CONFIG" ] || {
-        echo "sing-box config not found: $CONFIG" >&2
-        return 1
-    }
-
     echo "sing-box: startup configuration: $CONFIG (service directory: $SERVICE_DIR)"
     [ -x "$SBCTL" ] || {
         echo "sing-box: missing startup preflight controller: $SBCTL; install the updated scripts. Core was not started." >&2
         return 1
     }
-    # Syntax may be cached, but local listener addresses must be checked again
-    # on every start. Exported selectors keep all helpers on the same config.
+    # Prepare split sources before looking for the generated JSON. Syntax may
+    # be cached, but source edits and local listener addresses are checked on
+    # every start. Exported selectors keep helpers on the same runtime paths.
     "$SBCTL" preflight || {
         echo 'sing-box: startup preflight failed; core was not started.' >&2
+        return 1
+    }
+    [ -f "$CONFIG" ] || {
+        echo "sing-box config not found after startup preflight: $CONFIG" >&2
         return 1
     }
 
@@ -231,5 +231,15 @@ stop_service() {
 }
 
 reload_service() {
+    load_service_paths || return 1
+    [ -x "$SBCTL" ] || {
+        echo "sing-box: missing reload preflight controller: $SBCTL; install the updated scripts." >&2
+        return 1
+    }
+    "$SBCTL" preflight || {
+        echo 'sing-box: reload preflight failed; the running core was not signaled.' >&2
+        return 1
+    }
+    check_cgroup2 || return 1
     procd_send_signal sing-box
 }

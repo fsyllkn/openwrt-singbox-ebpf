@@ -6,6 +6,7 @@ on:
     paths:
       - 'scripts/**'
       - 'openwrt/**'
+      - 'systemd/**'
       - 'config/**'
       - 'providers/**'
       - 'examples/**'
@@ -53,6 +54,9 @@ jobs:
           test ! -e "$archive_root/providers/xboard.json"
           test -f "$archive_root/examples/xboard.sample.json"
           test -f "$archive_root/examples/local.sample.json"
+          test -f "$archive_root/scripts/config-parts.sh"
+          test -f "$archive_root/scripts/config-parts-lib.sh"
+          test -f "$archive_root/examples/config-routing.sample.json"
           echo 'Anonymous public bootstrap and source archive match this checkout.'
           # Also verify the floating entry points used by the SSH instructions,
           # without comparing a possibly newer main with this workflow's commit.
@@ -106,6 +110,10 @@ jobs:
           bash tests/test_sbctl_portability.sh
           sh tests/test_device_helpers.sh
           sh tests/test_pc_privacy_policy.sh
+      - name: Verify split configuration transactions and controller/menu integration
+        run: |
+          bash tests/test_config_parts.sh
+          python3 tests/test_config_parts_integration.py
       - name: Verify download modes, standalone public bootstrap and sanitized examples
         run: |
           bash tests/test_download_proxy.sh
@@ -129,6 +137,7 @@ jobs:
           core_binary=$(find "$RUNNER_TEMP/public-config-core" -type f -name sing-box -print -quit)
           test -n "$core_binary"
           sudo env SB_TEST_CORE="$core_binary" bash tests/test_generic_config_core.sh
+          sudo env SB_TEST_CORE="$core_binary" bash tests/test_config_parts_core.sh
           sudo env SB_TEST_CORE="$core_binary" python3 tests/test_provider_startup.py
       - name: eBPF runtime diagnostic should skip missing gRPC API (mock-only)
         run: |

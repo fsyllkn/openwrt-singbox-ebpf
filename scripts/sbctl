@@ -14,13 +14,18 @@ PATHS_HELPER="$(dirname "$SBCTL_FILE")/runtime-paths.sh"
 [ -r "$PATHS_HELPER" ] || { echo "Missing $PATHS_HELPER; deploy the updated scripts together." >&2; exit 1; }
 . "$PATHS_HELPER"
 sb_load_paths || exit 1
+PARTS_HELPER="$(dirname "$SBCTL_FILE")/config-parts-lib.sh"
+[ -r "$PARTS_HELPER" ] || { echo "Missing $PARTS_HELPER; deploy the complete updated scripts directory." >&2; exit 1; }
+. "$PARTS_HELPER"
+SB_CONFIG_PARTS_TOOL="$(dirname "$SBCTL_FILE")/config-parts.sh"
+export SB_CONFIG_PARTS_TOOL
 SERVICE_DIR="$SH_SINGBOX_HOME"
 BIN="$SERVICE_DIR/bin/sing-box"
 CONFIG="$SH_SINGBOX_CONFIG"
 RUNTIME_DIR="$SERVICE_DIR/runtime"
 CHECK_LOG="$RUNTIME_DIR/config-check.log"
 VALID_CACHE="$RUNTIME_DIR/config.valid"
-CACHE_SCHEMA="5"
+CACHE_SCHEMA="6"
 SYSTEMD_UNIT="sing-box.service"
 OPENWRT_INIT="/etc/init.d/sing-box"
 
@@ -178,6 +183,11 @@ validate_config_full() {
 cmd_config() {
     info "Service directory: $SERVICE_DIR"
     info "Configuration file: $CONFIG"
+    if sb_parts_active; then
+        bash "$SB_CONFIG_PARTS_TOOL" status || return 1
+    else
+        info "Configuration mode: single file (use 'sbctl split-config' for a lossless conversion when compatible)."
+    fi
     [ -f "$CONFIG" ] || { err "Configuration file does not exist."; return 1; }
     command -v jq >/dev/null 2>&1 || { err "jq is required to inspect listeners."; return 1; }
     # Deliberately exclude accounts, provider URLs, keys and API secrets.
@@ -310,6 +320,10 @@ cmd_import_config() (
     [ "$(id -u)" -eq 0 ] || die "Run as root to replace the installed configuration."
     local source="$1" target candidate backup
     [ -f "$source" ] || die "Import file not found: $source"
+    if sb_parts_active; then
+        sb_parts_import "$source"
+        return
+    fi
     target="$(readlink -f "$CONFIG")" || die "Cannot resolve destination: $CONFIG"
     [ -f "$target" ] || die "Installed configuration not found: $CONFIG"
     [ ! "$source" -ef "$target" ] || die "This is already the active config; edit it and run 'sbctl preflight'."
@@ -339,6 +353,9 @@ show_recent_service_logs() {
 }
 
 cmd_check() {
+    # A changed or broken source must be considered before the old JSON cache.
+    # stop/cleanup/status deliberately never call this preparation step.
+    sb_parts_prepare || return 1
     check_files
     info "Configuration file: $CONFIG"
     if cache_is_valid; then
@@ -580,6 +597,7 @@ cmd_ebpf_status_brief() {
 # Traffic Takeover Mode & Filtering Management (Requirement 2)
 # -----------------------------------------------------------------------------
 cmd_filter() (
+    sb_parts_prepare || return 1
     check_files
     command -v jq >/dev/null 2>&1 || die "jq is required to edit structured configuration."
     local subcmd="${1:-show}" value="${2:-}" target candidate backup policy direct_tag
@@ -613,6 +631,46 @@ cmd_filter() (
         *) die "Usage: sbctl filter {show|exclude-proc NAME|remove-proc NAME|exclude-user UID|remove-user UID|include-user UID|reset}" ;;
     esac
     [ "$(id -u)" -eq 0 ] || die "Run as root to modify filtering."
+    local parts_expected=
+    if sb_parts_active; then parts_expected="$(sb_parts_fingerprint)" || return 1; fi
+    if sb_parts_active && { [ "$subcmd" = exclude-proc ] || [ "$subcmd" = remove-proc ]; }; then
+        # User process bypasses live in the exception list. Do not rewrite the
+        # project-owned sshd/tailscaled/zerotier management rule.
+        local part_source part_candidate
+        part_source="$(sb_parts_dir)/routing.json"
+        part_candidate="$(mktemp "$RUNTIME_DIR/.routing-edit.XXXXXX")" || die "Cannot stage route exception"
+        trap 'rm -f "$part_candidate"' EXIT
+        chmod 0600 "$part_candidate"
+        jq --arg action "$subcmd" --arg name "$value" "$policy"'
+          def simple_direct:
+            .outbound=="direct" and (.action // "route")=="route"
+            and (.type // "default")=="default" and .process_name?!=null
+            and ((keys - ["type","action","outbound","process_name"]) | length)==0;
+          (.route.rules // []) as $rules
+          | if $action=="remove-proc" then
+              .route.rules=($rules | map(
+                if simple_direct then
+                  .process_name=((.process_name|items)-[$name])
+                  | select((.process_name|length)>0)
+                else . end))
+            else
+              ([range(0; $rules|length) | select($rules[.] | simple_direct)] | first) as $existing
+              | if $existing != null then
+                  .route.rules[$existing].process_name=
+                    (($rules[$existing].process_name | items) + [$name] | unique)
+                else
+                  .route.rules=([{"process_name":[$name],"action":"route","outbound":"direct"}] + $rules)
+                end
+            end
+        ' "$part_source" > "$part_candidate" || die "Cannot construct route exception"
+        if cmp -s "$part_source" "$part_candidate"; then
+            info "User process exceptions already match; project management-process rules remain in the fixed policy."
+            return
+        fi
+        SB_CONFIG_PARTS_EXPECTED="$parts_expected" sb_parts_set routing "$part_candidate" || return 1
+        ok "User process routing updated; no service restart performed."
+        return
+    fi
     target="$(readlink -f "$CONFIG")" || die "Cannot resolve configuration path"
     candidate="$(mktemp "${target}.filter.XXXXXX")" || die "Cannot stage filtering update"
     trap 'rm -f "$candidate" "$VALID_CACHE" 2>/dev/null || true' EXIT
@@ -681,6 +739,11 @@ cmd_filter() (
             ;;
     esac
     if cmp -s "$target" "$candidate"; then info "Filtering already matches the request."; return; fi
+    if sb_parts_active; then
+        SB_CONFIG_PARTS_EXPECTED="$parts_expected" sb_parts_commit "$candidate" inbounds || return 1
+        ok "UID filtering updated in the inbounds source; no service restart performed."
+        return
+    fi
     CONFIG="$candidate"
     validate_config_full || { err "Filtering update cancelled; original configuration unchanged."; return 1; }
     backup="$target.before-filter.$(date +%Y%m%d-%H%M%S).$$.bak"
@@ -700,7 +763,11 @@ cmd_test_leak() {
 }
 
 cmd_update_core() {
-    check_files
+    if sb_parts_active; then
+        [ -x "$BIN" ] || die "Existing core not found: $BIN"
+    else
+        check_files
+    fi
     if [ -x "$SERVICE_DIR/scripts/update-core.sh" ]; then
         exec "$SERVICE_DIR/scripts/update-core.sh" "$@"
     else
@@ -733,6 +800,9 @@ Service Management:
   preflight              Validate config, local IPv4 listeners and upstream UIDs
   check-xtunnel          Check actual upstream UIDs against eBPF selectors
   import-config FILE     Validate, back up and import a config; no restart
+  split-config           Losslessly split a compatible full config; no restart
+  single-config          Keep full JSON and archive split sources; no restart
+  config-part NAME FILE  Validate/apply a single source fragment; no restart
   logs [-f]              Inspect logs (journalctl or logread)
 
 Traffic Takeover & Filters:
@@ -764,8 +834,11 @@ case "${1:-help}" in
     check)        cmd_check ;;
     config)       cmd_config ;;
     preflight)    cmd_preflight ;;
-    check-xtunnel) check_files; check_xtunnel_exclusions ;;
+    check-xtunnel) sb_parts_prepare; check_files; check_xtunnel_exclusions ;;
     import-config) shift; cmd_import_config "$@" ;;
+    split-config) shift; bash "$SB_CONFIG_PARTS_TOOL" init "$@" ;;
+    single-config) shift; bash "$SB_CONFIG_PARTS_TOOL" disable "$@" ;;
+    config-part) shift; bash "$SB_CONFIG_PARTS_TOOL" set "$@" ;;
     start)        cmd_start ;;
     stop)         cmd_stop ;;
     restart)      cmd_restart ;;

@@ -15,7 +15,7 @@ MOCK_ADDRESS_FILE="$TEST_DIR/addresses"
 export CORE_LOG SERVICE_LOG MOCK_ADDRESS_FILE
 mkdir -p "$TEST_HOME/bin" "$TEST_HOME/scripts" "$TEST_HOME/config" \
     "$TEST_DIR/tools" "$TEST_DIR/commands" "$(dirname "$TEST_CONFIG")"
-cp "$BASE/scripts/sbctl" "$BASE/scripts/runtime-paths.sh" "$TEST_HOME/scripts/"
+cp "$BASE/scripts/sbctl" "$BASE/scripts/runtime-paths.sh" "$BASE/scripts/config-parts-lib.sh" "$BASE/scripts/config-parts.sh" "$TEST_HOME/scripts/"
 ln -s "$TEST_HOME/scripts/sbctl" "$TEST_LINK"
 : > "$CORE_LOG"
 : > "$SERVICE_LOG"

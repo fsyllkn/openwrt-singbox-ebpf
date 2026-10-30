@@ -57,6 +57,10 @@ cat > "$SH_SINGBOX_HOME/bin/sing-box" <<'SH'
 #!/bin/sh
 [ "$1" = check ] && [ "$2" = -c ] || exit 64
 [ "${MOCK_CHECK_STATUS:-0}" -eq 0 ] || exit "$MOCK_CHECK_STATUS"
+if [ -n "${MOCK_RACE_TRIGGER:-}" ] && [ -f "$MOCK_RACE_TRIGGER" ]; then
+    cp "$MOCK_RACE_CONTENT" "$MOCK_RACE_DEST"
+    rm -f "$MOCK_RACE_TRIGGER"
+fi
 jq -e 'type=="object" and (.inbounds|type=="array")' "$3" >/dev/null
 SH
 cat > "$TMP/tools/curl" <<'SH'
@@ -234,4 +238,101 @@ bash "$BASE/scripts/test-leak.sh" > "$TMP/leak.log" 2>&1 || fail 'portable host 
 grep -Fq 'belongs to a configured IPv4 FakeIP range' "$TMP/leak.log" || fail 'diagnostics assumed fixed FakeIP range'
 grep -Fq 'exclude_uid=[1200]' "$TMP/leak.log" || fail 'diagnostics did not read configured UID'
 if grep -Eq '100% intercepted|All user UIDs intercepted|PCRE unsupported' "$TMP/leak.log"; then fail 'diagnostic portability or certainty regression'; fi
+
+# Exercise the real section composer while keeping core/device validation local
+# to this fixture. The helpers must commit sources, not just generated output.
+mkdir -p "$SH_SINGBOX_HOME/scripts" "$SH_SINGBOX_HOME/providers"
+cp "$BASE/examples/xboard.sample.json" "$SH_SINGBOX_HOME/providers/xboard.json"
+cp "$BASE/examples/local.sample.json" "$SH_SINGBOX_HOME/providers/local.json"
+cat > "$SH_SINGBOX_HOME/scripts/sbctl" <<'SH'
+#!/bin/sh
+set -eu
+[ "$*" = preflight ] || exit 64
+[ "${MOCK_PARTS_PREFLIGHT_FAIL:-0}" = 0 ] || { echo 'mock device preflight rejected candidate' >&2; exit 47; }
+exec "$SH_SINGBOX_HOME/bin/sing-box" check -c "$SH_SINGBOX_CONFIG"
+SH
+chmod 0755 "$SH_SINGBOX_HOME/scripts/sbctl"
+SB_CONFIG_PARTS_TOOL="$BASE/scripts/config-parts.sh"; export SB_CONFIG_PARTS_TOOL
+jq --slurpfile existing "$TMP/original.json" '
+ .inbounds=$existing[0].inbounds
+ | .outbounds += [$existing[0].outbounds[]|select(.tag=="office-node")]
+ | .route.rules=(.route.rules[:3]
+      + [$existing[0].route.rules[]|select(.ip_cidr?)] + .route.rules[3:])
+' "$BASE/config/config.template.json" > "$TARGET"
+bash "$SB_CONFIG_PARTS_TOOL" init > "$TMP/parts-init.log" 2>&1 || fail 'could not initialize compatible helper fixture sections'
+PARTS_DIR="${SH_SINGBOX_CONFIG%.json}.d"
+[ -d "$PARTS_DIR" ] && [ -L "$SH_SINGBOX_CONFIG" ] || fail 'section initialization lost the configured symlink entry'
+cp "$PARTS_DIR/routing.json" "$TMP/parts-routing-before.json"
+
+printf '\n32323\nmanaged-user\nmanaged-password-1234\n' | \
+ bash "$BASE/scripts/configure-pc-proxy.sh" configure > "$TMP/parts-lan.log" 2>&1 || fail 'managed LAN edit failed'
+jq -e 'any(.inbounds[]; .tag=="lan-mixed" and .listen_port==32323
+  and .tcp_fast_open==true and any(.users[]; .username=="managed-user" and .password=="managed-password-1234")
+  and any(.users[]; .username=="block" and .password=="keep-this-password-1234"))' \
+  "$PARTS_DIR/inbounds.json" >/dev/null || fail 'managed LAN edit did not update source credentials/options'
+bash "$SB_CONFIG_PARTS_TOOL" render > "$TMP/parts-render.log" 2>&1 || fail 'LAN edits did not survive a rebuild'
+jq -e --slurpfile source "$PARTS_DIR/inbounds.json" '.inbounds==$source[0].inbounds' "$TARGET" >/dev/null || fail 'rebuilt LAN settings differ from their source'
+cp "$TARGET" "$TMP/parts-lan-valid.json"
+cp "$PARTS_DIR/inbounds.json" "$TMP/parts-inbounds-valid.json"
+if printf '\n32324\nmanaged-user\nmanaged-password-5678\n' | \
+ MOCK_PARTS_PREFLIGHT_FAIL=1 bash "$BASE/scripts/configure-pc-proxy.sh" configure > "$TMP/parts-lan-rejected.log" 2>&1; then
+ fail 'managed LAN edit ignored failed candidate device validation'
+fi
+cmp -s "$TARGET" "$TMP/parts-lan-valid.json" && \
+ cmp -s "$PARTS_DIR/inbounds.json" "$TMP/parts-inbounds-valid.json" || fail 'rejected LAN commit changed generated config or source'
+
+# Model a second editor saving the same section after this helper read it but
+# before commit begins. Only the new concurrent edit may remain pending.
+jq '.inbounds |= map(if .tag=="lan-explicit-proxy" then .listen_port=18792 else . end)' \
+ "$PARTS_DIR/inbounds.json" > "$TMP/concurrent-inbounds.json"
+: > "$TMP/race-ready"
+if printf '\n32324\nmanaged-user\nmanaged-password-5678\n' | \
+ MOCK_RACE_TRIGGER="$TMP/race-ready" MOCK_RACE_CONTENT="$TMP/concurrent-inbounds.json" \
+ MOCK_RACE_DEST="$PARTS_DIR/inbounds.json" \
+ bash "$BASE/scripts/configure-pc-proxy.sh" configure > "$TMP/parts-lan-concurrent.log" 2>&1; then
+ fail 'managed LAN edit overwrote a concurrent edit to the same section'
+fi
+[ ! -e "$TMP/race-ready" ] || fail 'concurrent edit fixture was not exercised'
+cmp -s "$PARTS_DIR/inbounds.json" "$TMP/concurrent-inbounds.json" || fail 'stale helper discarded a newer pending section'
+cmp -s "$TARGET" "$TMP/parts-lan-valid.json" || fail 'stale helper changed generated output'
+bash "$SB_CONFIG_PARTS_TOOL" render > "$TMP/parts-concurrent-render.log" 2>&1 || fail 'preserved concurrent edit could not be rendered'
+jq -e 'any(.inbounds[]; .tag=="lan-explicit-proxy" and .listen_port==18792)' "$TARGET" >/dev/null || fail 'concurrent edit disappeared after rebuild'
+
+bash "$BASE/scripts/align-xtunnel-ebpf.sh" > "$TMP/parts-uid.log" 2>&1 || fail 'managed UID alignment failed'
+jq -e '.inbounds[]|select(.type=="ebpf")|.local.exclude_uid==[777,1200,36011]' \
+ "$PARTS_DIR/inbounds.json" >/dev/null || fail 'UID exclusions were not written to the inbounds source'
+bash "$SB_CONFIG_PARTS_TOOL" render > "$TMP/parts-uid-render.log" 2>&1 || fail 'UID source could not be rebuilt'
+jq -e '.inbounds[]|select(.type=="ebpf")|.local.exclude_uid==[777,1200,36011]' "$TARGET" >/dev/null || fail 'UID exclusions disappeared on rebuild'
+cmp -s "$PARTS_DIR/routing.json" "$TMP/parts-routing-before.json" || fail 'inbound helpers rewrote user routing exceptions'
+bash "$BASE/scripts/configure-pc-proxy.sh" disable > "$TMP/parts-lan-disable.log" 2>&1 || fail 'managed LAN disable failed'
+jq -e 'all(.inbounds[]; .tag!="lan-mixed")' "$PARTS_DIR/inbounds.json" >/dev/null || fail 'managed LAN disable did not update its source'
+
+# A policy refresh may replace fixed DNS, but cannot restore a removed inbound
+# or rewrite any of the user's five section files.
+for section in providers inbounds outbounds routing settings; do
+ cp "$PARTS_DIR/$section.json" "$TMP/parts-$section-before-privacy.json"
+done
+jq '.dns.timeout="6s"' "$SH_SINGBOX_HOME/config/config.template.json" > "$TMP/next-policy.json"
+mv "$TMP/next-policy.json" "$SH_SINGBOX_HOME/config/config.template.json"
+bash "$BASE/scripts/apply-pc-privacy.sh" apply > "$TMP/parts-privacy.log" 2>&1 || fail 'managed policy refresh failed'
+jq -e '.dns.timeout=="6s" and all(.inbounds[]; .tag!="lan-mixed")' "$TARGET" >/dev/null || fail 'managed privacy refresh rewrote user inbounds or did not refresh fixed DNS'
+for section in providers inbounds outbounds routing settings; do
+ cmp -s "$PARTS_DIR/$section.json" "$TMP/parts-$section-before-privacy.json" || fail "managed privacy refresh rewrote $section source"
+done
+cp "$TARGET" "$TMP/parts-before-migration.json"
+if bash "$BASE/scripts/migrate-config.sh" > "$TMP/parts-migration.log" 2>&1; then
+ fail 'legacy migration wrote managed generated config'
+fi
+if bash "$BASE/scripts/migrate-config.sh" "$TARGET" > "$TMP/parts-migration-alias.log" 2>&1; then
+ fail 'legacy migration accepted the resolved alias of managed generated config'
+fi
+cmp -s "$TARGET" "$TMP/parts-before-migration.json" || fail 'refused legacy migration changed generated output'
+
+printf '{\n' > "$PARTS_DIR/inbounds.json"
+bash "$BASE/scripts/configure-pc-proxy.sh" status > "$TMP/parts-status.log" 2>&1 || fail 'LAN status tried to apply malformed pending source'
+if bash "$BASE/scripts/configure-pc-proxy.sh" disable > "$TMP/parts-invalid.log" 2>&1; then
+ fail 'LAN edit silently used stale generated output with malformed source'
+fi
+cmp -s "$TARGET" "$TMP/parts-before-migration.json" || fail 'malformed source changed generated output'
+if grep -Fq managed-password-1234 "$TMP/parts-"*.log; then fail 'managed helper logged a proxy password'; fi
 echo 'Generic-device helper preservation and portability tests passed.'

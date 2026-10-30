@@ -4,8 +4,11 @@
 set -euo pipefail
 
 SCRIPT_FILE="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
-. "$(dirname "$SCRIPT_FILE")/runtime-paths.sh"
+SCRIPT_DIR="$(dirname "$SCRIPT_FILE")"
+. "$SCRIPT_DIR/runtime-paths.sh"
 sb_load_paths || exit 1
+. "$SCRIPT_DIR/config-parts-lib.sh"
+SB_CONFIG_PARTS_TOOL="${SB_CONFIG_PARTS_TOOL:-$SCRIPT_DIR/config-parts.sh}"
 umask 077
 
 HOME_DIR="$SH_SINGBOX_HOME"
@@ -16,6 +19,16 @@ die() { printf '[ERROR] %s\n' "$*" >&2; exit 1; }
 info() { printf '[sing-box] %s\n' "$*"; }
 [ "$(id -u)" -eq 0 ] || die 'Run as root.'
 for cmd in jq ip mktemp; do command -v "$cmd" >/dev/null 2>&1 || die "Missing $cmd"; done
+PARTS_FINGERPRINT=
+case "${1:-}" in
+    configure|disable)
+        sb_parts_prepare || die 'Cannot prepare managed configuration; correct the section files first.'
+        if sb_parts_active; then
+            PARTS_FINGERPRINT=$(sb_parts_fingerprint) || die 'Cannot snapshot managed configuration before editing.'
+        fi ;;
+    status) ;; # Report the current generated listener without applying pending edits.
+    *) die 'Usage: configure-pc-proxy.sh {configure|disable|status}' ;;
+esac
 [ -f "$CONFIG" ] || die "Missing config: $CONFIG"
 CONFIG="$(readlink -f "$CONFIG")" || die 'Cannot resolve the active config target.'
 [ -x "$BIN" ] || die "Missing reF1nd binary: $BIN"
@@ -128,8 +141,14 @@ fi
 backup="$CONFIG.before-lan-mixed.$(date +%Y%m%d-%H%M%S).$$.bak"
 cp "$CONFIG" "$backup" || die 'Cannot create backup'
 chmod 0600 "$backup"
-mv -f "$TMP" "$CONFIG"
-chmod 0600 "$CONFIG"
+if [ -n "$PARTS_FINGERPRINT" ]; then
+    SB_CONFIG_PARTS_EXPECTED="$PARTS_FINGERPRINT" sb_parts_commit "$TMP" inbounds ||
+        die 'Could not save managed inbounds; another edit may have changed the source. Review and retry.'
+else
+    sb_parts_active && die 'Configuration mode changed while editing; review and retry.'
+    mv -f "$TMP" "$CONFIG"
+    chmod 0600 "$CONFIG"
+fi
 rm -f "$HOME_DIR/runtime/config.valid" 2>/dev/null || true
 info "Validated and saved; backup: $backup"
 info 'Restart sing-box manually using sb menu option 3 when ready.'

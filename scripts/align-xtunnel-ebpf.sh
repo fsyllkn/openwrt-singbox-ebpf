@@ -3,8 +3,11 @@
 set -euo pipefail
 
 SCRIPT_FILE="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
-. "$(dirname "$SCRIPT_FILE")/runtime-paths.sh"
+SCRIPT_DIR="$(dirname "$SCRIPT_FILE")"
+. "$SCRIPT_DIR/runtime-paths.sh"
 sb_load_paths || exit 1
+. "$SCRIPT_DIR/config-parts-lib.sh"
+SB_CONFIG_PARTS_TOOL="${SB_CONFIG_PARTS_TOOL:-$SCRIPT_DIR/config-parts.sh}"
 umask 077
 
 ROOT="$SH_SINGBOX_HOME"
@@ -15,6 +18,11 @@ die() { echo "[ERROR] $*" >&2; exit 1; }
 info() { echo "[sing-box] $*"; }
 
 [ "$(id -u)" -eq 0 ] || die 'Run as root.'
+sb_parts_prepare || die 'Cannot prepare managed configuration; correct the section files first.'
+PARTS_FINGERPRINT=
+if sb_parts_active; then
+    PARTS_FINGERPRINT=$(sb_parts_fingerprint) || die 'Cannot snapshot managed configuration before editing.'
+fi
 [ -f "$CONFIG" ] && [ -x "$BIN" ] || die 'Missing sing-box config or binary.'
 CONFIG="$(readlink -f "$CONFIG")" || die 'Cannot resolve the active config target.'
 command -v jq >/dev/null || die 'jq required.'
@@ -71,8 +79,14 @@ fi
 backup="$CONFIG.before-xt-ebpf.$(date +%Y%m%d-%H%M%S).$$.bak"
 cp -p "$CONFIG" "$backup" || die 'Backup failed.'
 chmod 0600 "$backup"
-mv -f "$stage" "$CONFIG" || die 'Could not replace configuration.'
-chmod 0600 "$CONFIG"
+if [ -n "$PARTS_FINGERPRINT" ]; then
+    SB_CONFIG_PARTS_EXPECTED="$PARTS_FINGERPRINT" sb_parts_commit "$stage" inbounds ||
+        die 'Could not save managed inbounds; another edit may have changed the source. Review and retry.'
+else
+    sb_parts_active && die 'Configuration mode changed while editing; review and retry.'
+    mv -f "$stage" "$CONFIG" || die 'Could not replace configuration.'
+    chmod 0600 "$CONFIG"
+fi
 rm -f "$ROOT/runtime/config.valid" 2>/dev/null || true
 info "Config validated and updated; backup: $backup"
 info "Excluded X-Tunnel UIDs: $uid_json"

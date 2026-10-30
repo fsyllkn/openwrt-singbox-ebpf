@@ -1,6 +1,7 @@
-[Slice]
+[Unit]
 Description=Sing-box eBPF Transparent Proxy Resource Isolation
 
+[Slice]
 # Memory limit: prevent runaway processes from exhausting system RAM.
 MemoryMax=512M
 MemoryHigh=384M

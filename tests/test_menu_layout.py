@@ -31,6 +31,7 @@ EXPECTED_ACTIONS = {
     22: "run_sbctl ebpf-status",
     23: "Uninstall sing-box services",
     24: "configure_download_proxy",
+    25: "manage_config_parts",
 }
 
 
@@ -59,7 +60,7 @@ class SingBoxMenuLayoutTest(unittest.TestCase):
                       "【PC 代理与隐私】", "【X-Tunnel / eBPF 诊断】", "【维护】"):
             self.assertIn(group, screen)
 
-    def test_all_24_menu_handlers_remain_available(self):
+    def test_all_25_menu_handlers_remain_available(self):
         _, cases, order = menu_parts()
         self.assertEqual(order, list(EXPECTED_ACTIONS))
         for number, marker in EXPECTED_ACTIONS.items():
@@ -90,7 +91,7 @@ class SingBoxMenuLayoutTest(unittest.TestCase):
             if len(choices) == 2:
                 paired_entries += 1
                 self.assertEqual(cells(line[:choices[1].end()]), 37)
-        self.assertGreaterEqual(menu_entries, 24)
+        self.assertGreaterEqual(menu_entries, 25)
         self.assertGreaterEqual(paired_entries, 7)
 
     def test_restart_preserves_ebpf_uid_safety_and_logs_are_four(self):

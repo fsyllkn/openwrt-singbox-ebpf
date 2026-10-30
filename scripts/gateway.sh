@@ -30,6 +30,22 @@ die() { echo "gateway: $*" >&2; exit 1; }
 require_root() { [ "$(id -u)" -eq 0 ] || die "root is required"; }
 need() { command -v "$1" >/dev/null 2>&1 || die "missing $1"; }
 
+# Load/prepare sections only for operations that consume or change CONFIG.
+# Cleanup and status must work even when section files or their tool are broken.
+prepare_config() {
+    [ -r "$SCRIPT_DIR/config-parts-lib.sh" ] ||
+        die "config-parts-lib.sh is missing; deploy the complete scripts directory or rerun install.sh"
+    # shellcheck source=config-parts-lib.sh
+    . "$SCRIPT_DIR/config-parts-lib.sh"
+    SB_CONFIG_PARTS_TOOL="${SB_CONFIG_PARTS_TOOL:-$SCRIPT_DIR/config-parts.sh}"
+    sb_parts_prepare || die "cannot prepare managed configuration; correct the section files first"
+    GATEWAY_PARTS_FINGERPRINT=
+    if sb_parts_active; then
+        GATEWAY_PARTS_FINGERPRINT=$(sb_parts_fingerprint) ||
+            die "cannot snapshot managed configuration before editing"
+    fi
+}
+
 # The BusyBox ip applet shipped on some OpenWrt builds rejects nonstandard
 # 32-bit routing-table IDs (e.g. 53136). ip-full/iproute2 is mandatory.
 # Run this BEFORE changing forwarding, marking or any kernel routing state.
@@ -137,6 +153,7 @@ configure() {
     [[ "$IFACE" =~ ^[A-Za-z0-9_.:-]+$ ]] || die "invalid interface name"
     valid_ipv4_cidr "$LAN_CIDR" || die "invalid LAN CIDR: $LAN_CIDR"
     check_interface
+    prepare_config
     [ -f "$CONFIG" ] || die "configuration not found: $CONFIG"
     jq -e '.inbounds | type == "array"' "$CONFIG" >/dev/null \
         || die "configuration must contain an inbounds array"
@@ -163,8 +180,21 @@ configure() {
             '{interface:$interface,source_cidr:$source_cidr}' > "$settings_tmp"
     fi
     cp -p "$target" "$backup"
-    chmod --reference="$target" "$tmp" 2>/dev/null || chmod 0600 "$tmp"
-    mv -f "$tmp" "$target"
+    chmod 0600 "$backup"
+    if [ -n "$GATEWAY_PARTS_FINGERPRINT" ]; then
+        if ! SB_CONFIG_PARTS_EXPECTED="$GATEWAY_PARTS_FINGERPRINT" sb_parts_commit "$tmp" inbounds; then
+            rm -f "$tmp" "$settings_tmp"
+            die "cannot save managed inbounds; gateway settings unchanged"
+        fi
+        rm -f "$tmp"
+    else
+        if sb_parts_active; then
+            rm -f "$tmp" "$settings_tmp"
+            die "configuration mode changed while editing; gateway settings unchanged"
+        fi
+        chmod --reference="$target" "$tmp" 2>/dev/null || chmod 0600 "$tmp"
+        mv -f "$tmp" "$target"
+    fi
     mv -f "$settings_tmp" "$SETTINGS"
     echo "Configured LAN TProxy gateway on $IFACE for $LAN_CIDR; backup: $backup"
     echo "Run 'sbctl preflight' and 'sbctl restart' before changing a client gateway."
@@ -299,6 +329,7 @@ apply() {
     require_root
     [ -f "$SETTINGS" ] || return 0
     read_settings; check_interface; need nft; check_iproute2
+    prepare_config
     [ -f "$CONFIG" ] || die "configuration not found"
     check_tproxy_inbound
     check_shared_interception
@@ -354,6 +385,7 @@ EOF
 disable() {
     require_root; need jq
     cleanup
+    prepare_config
     [ -f "$CONFIG" ] || die "configuration not found"
     local target tmp
     target="$(readlink -f "$CONFIG")" || die "cannot resolve configuration target: $CONFIG"
@@ -361,8 +393,20 @@ disable() {
     tmp="$(mktemp "${target}.gateway.XXXXXX")"
     jq --argjson port "$PORT" '.inbounds |= map(select(
       (.tag == "lan-tproxy" and .type == "tproxy" and .listen_port == $port) | not))' "$target" > "$tmp"
-    chmod --reference="$target" "$tmp" 2>/dev/null || chmod 0600 "$tmp"
-    mv -f "$tmp" "$target"
+    if [ -n "$GATEWAY_PARTS_FINGERPRINT" ]; then
+        if ! SB_CONFIG_PARTS_EXPECTED="$GATEWAY_PARTS_FINGERPRINT" sb_parts_commit "$tmp" inbounds; then
+            rm -f "$tmp"
+            die "network cleanup completed, but managed inbound removal failed; gateway settings retained"
+        fi
+        rm -f "$tmp"
+    else
+        if sb_parts_active; then
+            rm -f "$tmp"
+            die "configuration mode changed while editing; gateway settings retained"
+        fi
+        chmod --reference="$target" "$tmp" 2>/dev/null || chmod 0600 "$tmp"
+        mv -f "$tmp" "$target"
+    fi
     rm -f "$SETTINGS"
     echo "LAN TProxy gateway disabled; restart sing-box to apply listener changes."
 }
