@@ -256,7 +256,40 @@ cmp "$PARTS_DIR/build.json" "$TEST_CHECK_CONFIG_CAPTURE" || fail 'new core check
 [ "$(grep -c '^parts:build' "$TEST_EVENTS")" -ge 3 ] || fail 'split sources were not rechecked before binary replacement'
 assert_parts_unchanged
 
-for scenario in missing_output pending invalid_manual broken_build; do
+# A source menu/controller can export a missing, non-executable or obsolete
+# composer path. The updater must always use the deployed service's readable
+# script, including on archives/filesystems that do not preserve execute bits.
+for selector in missing nonexecutable executable; do
+    prepare_parts "split inherited $selector"
+    stale_tool="$CASE_DIR/old source/scripts/config-parts.sh"
+    mkdir -p "$(dirname "$stale_tool")"
+    if [ "$selector" != missing ]; then
+        cat > "$stale_tool" <<'SH'
+#!/bin/sh
+printf 'wrong-source-composer\n' >> "$TEST_EVENTS"
+exit 91
+SH
+        case "$selector" in
+            nonexecutable) chmod 0644 "$stale_tool" ;;
+            executable) chmod 0755 "$stale_tool" ;;
+        esac
+    fi
+    chmod 0644 "$SH_SINGBOX_HOME/scripts/config-parts.sh"
+    SB_CONFIG_PARTS_TOOL="$stale_tool" \
+        bash "$BASE/scripts/update-core.sh" v1.15.0-alpha.99-reF1nd > "$CASE_DIR/out" 2>&1 || {
+        cat "$CASE_DIR/out" >&2; fail "inherited $selector selector blocked the installed updater"
+    }
+    "$SH_SINGBOX_HOME/bin/sing-box" version | grep -Fq NEW-test-core || fail 'readable installed composer did not validate the update'
+    ! grep -q '^wrong-source-composer' "$TEST_EVENTS" || fail 'core updater executed an inherited source composer'
+    [ "$(grep -c '^parts:build' "$TEST_EVENTS")" -ge 3 ] || fail 'installed composer was not used for all update checks'
+    [ "$(stat -c '%a' "$SH_SINGBOX_HOME/scripts/config-parts.sh")" = 644 ] || fail 'updater changed composer permissions instead of invoking Bash'
+    if [ "$selector" = nonexecutable ]; then
+        [ "$(stat -c '%a' "$stale_tool")" = 644 ] || fail 'updater changed source permissions'
+    fi
+    assert_parts_unchanged
+done
+
+for scenario in missing_output pending invalid_manual broken_build missing_tool directory_tool; do
     prepare_parts "split-$scenario"
     case "$scenario" in
         missing_output) rm "$SH_SINGBOX_CONFIG" ;;
@@ -266,6 +299,10 @@ for scenario in missing_output pending invalid_manual broken_build; do
             cp "$PARTS_DIR/build.json" "$CASE_DIR/original-parts/build.json" ;;
         invalid_manual) export MOCK_PARTS_INVALID=1 ;;
         broken_build) export MOCK_PARTS_BUILD_STATUS=37 ;;
+        missing_tool) rm "$SH_SINGBOX_HOME/scripts/config-parts.sh" ;;
+        directory_tool)
+            rm "$SH_SINGBOX_HOME/scripts/config-parts.sh"
+            mkdir "$SH_SINGBOX_HOME/scripts/config-parts.sh" ;;
     esac
     if bash "$BASE/scripts/update-core.sh" v1.15.0-alpha.99-reF1nd > "$CASE_DIR/out" 2>&1; then
         fail "split $scenario update unexpectedly succeeded"
@@ -283,6 +320,9 @@ for scenario in missing_output pending invalid_manual broken_build; do
     fi
     case "$scenario" in
         missing_output|pending) grep -Fq 'sbctl preflight' "$CASE_DIR/out" || fail 'unapplied parts error omitted recovery command' ;;
+        missing_tool|directory_tool)
+            grep -Fq "Missing or unreadable installed configuration-parts tool: $SH_SINGBOX_HOME/scripts/config-parts.sh" "$CASE_DIR/out" ||
+                fail 'missing installed composer did not identify the actual service path' ;;
     esac
 done
 

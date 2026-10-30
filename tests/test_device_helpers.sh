@@ -252,25 +252,36 @@ set -eu
 exec "$SH_SINGBOX_HOME/bin/sing-box" check -c "$SH_SINGBOX_CONFIG"
 SH
 chmod 0755 "$SH_SINGBOX_HOME/scripts/sbctl"
-SB_CONFIG_PARTS_TOOL="$BASE/scripts/config-parts.sh"; export SB_CONFIG_PARTS_TOOL
+PARTS_TOOL="$BASE/scripts/config-parts.sh"
+# A source-menu selector must not cross an executable helper boundary. Keep a
+# callable decoy exported throughout validation, save and concurrent-edit tests.
+SB_CONFIG_PARTS_TOOL="$TMP/old-checkout-composer.sh"
+PARTS_SELECTOR_HIT="$TMP/foreign-composer-called"
+export SB_CONFIG_PARTS_TOOL PARTS_SELECTOR_HIT
+cat > "$SB_CONFIG_PARTS_TOOL" <<'SH'
+#!/bin/sh
+: > "$PARTS_SELECTOR_HIT"
+exit 97
+SH
 jq --slurpfile existing "$TMP/original.json" '
  .inbounds=$existing[0].inbounds
  | .outbounds += [$existing[0].outbounds[]|select(.tag=="office-node")]
  | .route.rules=(.route.rules[:3]
       + [$existing[0].route.rules[]|select(.ip_cidr?)] + .route.rules[3:])
 ' "$BASE/config/config.template.json" > "$TARGET"
-bash "$SB_CONFIG_PARTS_TOOL" init > "$TMP/parts-init.log" 2>&1 || fail 'could not initialize compatible helper fixture sections'
+bash "$PARTS_TOOL" init > "$TMP/parts-init.log" 2>&1 || fail 'could not initialize compatible helper fixture sections'
 PARTS_DIR="${SH_SINGBOX_CONFIG%.json}.d"
 [ -d "$PARTS_DIR" ] && [ -L "$SH_SINGBOX_CONFIG" ] || fail 'section initialization lost the configured symlink entry'
 cp "$PARTS_DIR/routing.json" "$TMP/parts-routing-before.json"
 
 printf '\n32323\nmanaged-user\nmanaged-password-1234\n' | \
- bash "$BASE/scripts/configure-pc-proxy.sh" configure > "$TMP/parts-lan.log" 2>&1 || fail 'managed LAN edit failed'
+ SB_CONFIG_PARTS_TOOL="$TMP/removed-checkout/config-parts.sh" \
+ bash "$BASE/scripts/configure-pc-proxy.sh" configure > "$TMP/parts-lan.log" 2>&1 || fail 'managed LAN edit failed with a stale inherited composer selector'
 jq -e 'any(.inbounds[]; .tag=="lan-mixed" and .listen_port==32323
   and .tcp_fast_open==true and any(.users[]; .username=="managed-user" and .password=="managed-password-1234")
   and any(.users[]; .username=="block" and .password=="keep-this-password-1234"))' \
   "$PARTS_DIR/inbounds.json" >/dev/null || fail 'managed LAN edit did not update source credentials/options'
-bash "$SB_CONFIG_PARTS_TOOL" render > "$TMP/parts-render.log" 2>&1 || fail 'LAN edits did not survive a rebuild'
+bash "$PARTS_TOOL" render > "$TMP/parts-render.log" 2>&1 || fail 'LAN edits did not survive a rebuild'
 jq -e --slurpfile source "$PARTS_DIR/inbounds.json" '.inbounds==$source[0].inbounds' "$TARGET" >/dev/null || fail 'rebuilt LAN settings differ from their source'
 cp "$TARGET" "$TMP/parts-lan-valid.json"
 cp "$PARTS_DIR/inbounds.json" "$TMP/parts-inbounds-valid.json"
@@ -295,13 +306,13 @@ fi
 [ ! -e "$TMP/race-ready" ] || fail 'concurrent edit fixture was not exercised'
 cmp -s "$PARTS_DIR/inbounds.json" "$TMP/concurrent-inbounds.json" || fail 'stale helper discarded a newer pending section'
 cmp -s "$TARGET" "$TMP/parts-lan-valid.json" || fail 'stale helper changed generated output'
-bash "$SB_CONFIG_PARTS_TOOL" render > "$TMP/parts-concurrent-render.log" 2>&1 || fail 'preserved concurrent edit could not be rendered'
+bash "$PARTS_TOOL" render > "$TMP/parts-concurrent-render.log" 2>&1 || fail 'preserved concurrent edit could not be rendered'
 jq -e 'any(.inbounds[]; .tag=="lan-explicit-proxy" and .listen_port==18792)' "$TARGET" >/dev/null || fail 'concurrent edit disappeared after rebuild'
 
 bash "$BASE/scripts/align-xtunnel-ebpf.sh" > "$TMP/parts-uid.log" 2>&1 || fail 'managed UID alignment failed'
 jq -e '.inbounds[]|select(.type=="ebpf")|.local.exclude_uid==[777,1200,36011]' \
  "$PARTS_DIR/inbounds.json" >/dev/null || fail 'UID exclusions were not written to the inbounds source'
-bash "$SB_CONFIG_PARTS_TOOL" render > "$TMP/parts-uid-render.log" 2>&1 || fail 'UID source could not be rebuilt'
+bash "$PARTS_TOOL" render > "$TMP/parts-uid-render.log" 2>&1 || fail 'UID source could not be rebuilt'
 jq -e '.inbounds[]|select(.type=="ebpf")|.local.exclude_uid==[777,1200,36011]' "$TARGET" >/dev/null || fail 'UID exclusions disappeared on rebuild'
 cmp -s "$PARTS_DIR/routing.json" "$TMP/parts-routing-before.json" || fail 'inbound helpers rewrote user routing exceptions'
 bash "$BASE/scripts/configure-pc-proxy.sh" disable > "$TMP/parts-lan-disable.log" 2>&1 || fail 'managed LAN disable failed'
@@ -335,4 +346,6 @@ if bash "$BASE/scripts/configure-pc-proxy.sh" disable > "$TMP/parts-invalid.log"
 fi
 cmp -s "$TARGET" "$TMP/parts-before-migration.json" || fail 'malformed source changed generated output'
 if grep -Fq managed-password-1234 "$TMP/parts-"*.log; then fail 'managed helper logged a proxy password'; fi
+[ ! -e "$PARTS_SELECTOR_HIT" ] || fail 'a device helper called an inherited foreign composer instead of its sibling'
+echo 'PASS helper composer binding ignores stale/foreign selectors without bypassing validation or concurrent-edit guards'
 echo 'Generic-device helper preservation and portability tests passed.'

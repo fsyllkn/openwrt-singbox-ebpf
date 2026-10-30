@@ -190,6 +190,102 @@ diagnose() { printf 'diagnose\\n' >> "$TEST_EVENTS"; }
     assert "卸载会停止 sing-box" in output and "保留配置、Provider 和 X-Tunnel" in output
     print("PASS all 25 actions, category retention, custom paths and preserved uninstall arguments")
 
+    # A source menu may itself inherit an exported selector from an older
+    # launcher. Its internal tool choice must never override the companion
+    # tools selected by the installer or by installed child scripts.
+    env_check = work / "check-child-environment.sh"
+    env_events = work / "environment-events"
+    script(env_check, '''#!/bin/sh
+if [ "${SB_CONFIG_PARTS_TOOL+x}" = x ]; then
+    printf 'Inherited a menu configuration-tool selector.\n' >&2
+    return 96
+fi
+if [ "$SH_SINGBOX_HOME" != "$TEST_HOME" ] ||
+   [ "$SH_SINGBOX_CONFIG" != "$TEST_CONFIG" ] ||
+   [ "${SB_DOWNLOAD_MODE-}" != http ] ||
+   [ "${SB_HTTP_PROXY-}" != "$TEST_HTTP_PROXY" ] ||
+   [ "${SB_GITHUB_PROXY-}" != "$TEST_GITHUB_PROXY" ] ||
+   [ "${SB_CONFIG_PARTS_EXPECTED-}" != "$TEST_EXPECTED_FINGERPRINT" ]; then
+    printf 'An intended runtime, download or concurrency selector was lost.\n' >&2
+    return 97
+fi
+printf '%s\n' "${0##*/}" >> "$TEST_ENV_EVENTS"
+''')
+    guarded_children = [
+        checkout / "install.sh", checkout / "quick-install.sh",
+        home / "scripts" / "sbctl", home / "scripts" / "gateway.sh",
+        home / "scripts" / "configure-pc-proxy.sh",
+        home / "scripts" / "apply-pc-privacy.sh",
+        home / "scripts" / "align-xtunnel-ebpf.sh",
+        checkout / "scripts" / "migrate-config.sh",
+        home / "uninstall.sh", installed_routes,
+    ]
+    saved_children = {path: path.read_text() for path in guarded_children}
+    inherited_env = dict(
+        SB_CONFIG_PARTS_TOOL=str(work / "removed old source" / "scripts" / "config-parts.sh"),
+        SB_INSTALL_SOURCE_DIR=str(checkout), SB_DOWNLOAD_MODE="http",
+        SB_HTTP_PROXY="http://127.0.0.1:18080", SB_GITHUB_PROXY="https://download.example.invalid/",
+        SB_CONFIG_PARTS_EXPECTED="a" * 64, TEST_EXPECTED_FINGERPRINT="a" * 64,
+        TEST_HOME=str(home), TEST_CONFIG=str(config),
+        TEST_HTTP_PROXY="http://127.0.0.1:18080", TEST_GITHUB_PROXY="https://download.example.invalid/",
+        TEST_CHILD_ENV_CHECK=str(env_check), TEST_ENV_EVENTS=str(env_events),
+    )
+    inheritance_lines = []
+    for category, actions in (
+        (5, ((1, ("",)), (2, ("", "")), (4, ()), (5, ("",)))),
+        (1, ((2, ()),)),
+        (3, ((2, ()), (3, ("",)), (4, ()), (5, ("",)))),
+        (4, ((3, ("",)), (4, ("",)))),
+        (6, ((2, ("",)), (4, ("",)))),
+    ):
+        inheritance_lines.append(str(category))
+        for number, answers in actions:
+            inheritance_lines.extend((str(number), *answers, ""))
+        inheritance_lines.append("0")
+    inheritance_lines.extend(("2", "0", "0"))
+    source_menu = menu
+    installed_menu = home / "scripts" / "menu.sh"
+    script(installed_menu, functions + overrides + "\nwhile :; do\n" + main_loop)
+    try:
+        for path, content in saved_children.items():
+            first, rest = content.split("\n", 1)
+            script(path, first + '\n. "$TEST_CHILD_ENV_CHECK" || exit $?\n' + rest)
+        for menu in (source_menu, installed_menu):
+            env_events.write_text("")
+            _, calls = run_menu("\n".join(inheritance_lines) + "\n", **inherited_env)
+            checked_children = env_events.read_text().splitlines()
+            assert set(checked_children) == {path.name for path in guarded_children}, checked_children
+            assert len(checked_children) == 15, checked_children
+            assert "install" in calls and "source-update:--update --no-menu" in calls
+            assert "sbctl:start" in calls and "routes:installed:menu" in calls
+    finally:
+        menu = source_menu
+        for path, content in saved_children.items():
+            script(path, content)
+
+    # A non-exported selector must still be visible to the menu's sourced
+    # library, even when that readable source script has no executable bit.
+    probe = checkout / "parts-tool-probe.sh"
+    script(probe, functions + '\n_sb_parts_run status\n')
+    source_parts_tool = checkout / "scripts" / "config-parts.sh"
+    original_parts_tool = source_parts_tool.read_bytes()
+    original_parts_mode = source_parts_tool.stat().st_mode & 0o777
+    try:
+        source_parts_tool.write_text('''#!/bin/sh
+. "$TEST_CHILD_ENV_CHECK" || exit $?
+[ "$*" = status ] || exit 98
+printf 'menu-local-tool-ok\n'
+''')
+        source_parts_tool.chmod(0o644)
+        result = subprocess.run(["sh", str(probe)], input="", text=True, capture_output=True,
+                                env={**env, **inherited_env}, timeout=10)
+        assert result.returncode == 0 and result.stdout == "menu-local-tool-ok\n", result.stderr
+    finally:
+        source_parts_tool.write_bytes(original_parts_tool)
+        source_parts_tool.chmod(original_parts_mode)
+    assert config.read_bytes() == original_config and provider.read_bytes() == original_provider
+    print("PASS source/installed menus isolate inherited tool paths and preserve runtime/download/concurrency environment")
+
     # Enter and explicit y produce identical actions. Cancelled and EOF
     # confirmations never call the core/controller or the uninstaller.
     for category, action_number in (("1", "3"), ("1", "4"), ("5", "5"), ("6", "4")):

@@ -41,6 +41,8 @@ sh /tmp/sb-openwrt.sh
 
 源码默认放在 `/overlay/openwrt-singbox-ebpf`，没有 `/overlay` 时使用 `/root/openwrt-singbox-ebpf`。可用绝对路径环境变量 `SB_INSTALL_SOURCE_DIR` 指定其他目录，支持普通空格。
 
+源码目录用于下载和更新项目；服务目录由 `SH_SINGBOX_HOME` 或 UCI 的 `sing-box.main.service_dir` 确定，默认是 `/opt/sing-box`。安装完成后的配置初始化、核心更新使用服务目录 `scripts/` 中的配套工具。菜单和其他工具各自解析本次运行所需的脚本位置，避免继承另一个源码目录的旧路径；源码归档中的 Bash 脚本只需可读，不要求预先添加执行权限。
+
 ### 通过本地或局域网 HTTP 代理
 
 首次下载脚本也必须经过代理时：
@@ -338,6 +340,19 @@ sbctl restart
 ```
 
 目录不同请替换 `cd` 路径。`--scripts-only` 会先检查并备份，再更新脚本、菜单、procd 文件及配套模板；保留用户分片、运行 JSON、Provider、核心和网关设置，不联网、不生成配置、不自动重启。分文件模式下，新模板中的 DNS/基础路由策略在下一次预检或启动时组装，通过校验后才写入生成 JSON；单文件模式不会自动改变 DNS/路由。
+
+### 安装在配置初始化阶段中断后的恢复
+
+旧版从源码菜单安装时，可能出现 `Missing configuration-parts tool: .../scripts/config-parts.sh`：菜单传入了源码目录的工具路径，安装器又把没有执行位误判为文件缺失。新版安装器使用实际服务目录中的可读工具，并交给 Bash 执行。
+
+如果已经遇到这个错误，先通过 **安装与更新 → 更新公开仓库源码** 更新，退出旧菜单，再进入更新完成后显示的实际源码目录执行：
+
+```sh
+bash ./install.sh
+sbctl config
+```
+
+这会补齐此前可能尚未完成的 CLI 和 procd 注册。中断前生成的完整 JSON、Provider 和用户配置会保留；重跑安装不会擅自迁移已有单文件配置。如果 `sbctl config` 显示为单文件模式，可执行 `sbctl split-config`，或进入 **配置与隐私 → 配置分文件模式 / 迁移 → 将兼容的单文件配置无损拆分**。迁移校验通过后才生成分片；不兼容的自定义 DNS 或规则顺序会保留原配置并提示原因。
 
 ### 一次完成源码与脚本更新
 

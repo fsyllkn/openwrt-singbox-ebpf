@@ -20,6 +20,10 @@ sb_load_paths || exit 1
 . "$REPO_ROOT/scripts/config-parts-lib.sh"
 INSTALL_DIR="$SH_SINGBOX_HOME"
 CONFIG="$SH_SINGBOX_CONFIG"
+# Installation subprocesses must use the scripts deployed into this HOME,
+# even when a source-checkout menu exported its own composition tool path.
+SB_CONFIG_PARTS_TOOL="$INSTALL_DIR/scripts/config-parts.sh"
+export SB_CONFIG_PARTS_TOOL
 SCRIPTS_ONLY=0
 case "${1:-}" in
     --scripts-only) [ "$#" -eq 1 ] || { echo 'Usage: bash install.sh [--scripts-only]' >&2; exit 2; }; SCRIPTS_ONLY=1 ;;
@@ -137,10 +141,11 @@ initialize_configuration() {
         info "Use 'sbctl split-config' for an explicit, lossless migration."
         return 0
     fi
+    parts_tool="$INSTALL_DIR/scripts/config-parts.sh"
+    [ -f "$parts_tool" ] && [ -r "$parts_tool" ] ||
+        die "Missing or unreadable configuration-parts tool: $parts_tool; update the installed scripts before continuing"
     create_default_config
-    parts_tool=${SB_CONFIG_PARTS_TOOL:-$INSTALL_DIR/scripts/config-parts.sh}
-    [ -x "$parts_tool" ] || die "Missing configuration-parts tool: $parts_tool; update the installed scripts before continuing"
-    SH_SINGBOX_HOME="$INSTALL_DIR" SH_SINGBOX_CONFIG="$CONFIG" "$parts_tool" init ||
+    SH_SINGBOX_HOME="$INSTALL_DIR" SH_SINGBOX_CONFIG="$CONFIG" SB_CONFIG_PARTS_TOOL="$parts_tool" bash "$parts_tool" init ||
         die "Initial configuration could not be split; the full JSON and providers were preserved. Resolve the validation error, then run 'sbctl split-config'."
     info "Editable configuration sources: $(SH_SINGBOX_CONFIG="$CONFIG" sb_parts_dir)"
 }

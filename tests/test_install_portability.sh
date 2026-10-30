@@ -15,6 +15,22 @@ awk '
 ' "$BASE/install.sh" > "$TEST_DIR/install-functions.sh"
 . "$TEST_DIR/install-functions.sh"
 
+# Exercise the real installer preamble without package/service operations. A
+# source menu's exported tool path must not escape into installation children.
+ENV_SOURCE=$TEST_DIR/installer\ environment\ source
+mkdir -p "$ENV_SOURCE/scripts"
+for helper in runtime-paths.sh download.sh config-parts-lib.sh; do
+    cp "$BASE/scripts/$helper" "$ENV_SOURCE/scripts/$helper"
+done
+awk '/^SCRIPTS_ONLY=0$/ { exit } { print }' "$BASE/install.sh" > "$ENV_SOURCE/install-env.sh"
+cat >> "$ENV_SOURCE/install-env.sh" <<'SH'
+[ "$SB_CONFIG_PARTS_TOOL" = "$INSTALL_DIR/scripts/config-parts.sh" ] || exit 71
+bash -c '[ "$SB_CONFIG_PARTS_TOOL" = "$SH_SINGBOX_HOME/scripts/config-parts.sh" ]' || exit 72
+SH
+SH_SINGBOX_HOME="$TEST_DIR/environment home" SH_SINGBOX_CONFIG="$TEST_DIR/environment config.json" \
+    SB_CONFIG_PARTS_TOOL="$ENV_SOURCE/scripts/missing-source-tool.sh" \
+    bash "$ENV_SOURCE/install-env.sh" || fail 'installer or child retained an inherited source tool path'
+
 INSTALL_DIR=$TEST_DIR/custom\ installation
 CONFIG=$TEST_DIR/external\ config/router.json
 REPO_ROOT=$TEST_DIR/custom\ source
@@ -109,39 +125,96 @@ done
     [ -f "$INSTALL_DIR/providers/local.sample.json" ] || fail 'deployment did not fill missing sample beside edited file'
 )
 
-# Only a genuinely new installation invokes init, after full JSON and both
-# provider files exist. Existing single-file devices require explicit migration.
+# Only a genuinely new installation invokes the installed init tool, after
+# full JSON and both providers exist. Source archives may be non-executable,
+# missing, or stale; none may replace the newly installed tool or gain chmod.
+for source_shape in readable missing executable; do
 (
-    INSTALL_DIR=$TEST_DIR/parts\ installation
-    CONFIG=$TEST_DIR/parts\ external/router.json
+    CASE_DIR=$TEST_DIR/parts-$source_shape
+    INSTALL_DIR=$CASE_DIR/installed\ home
+    CONFIG=$CASE_DIR/external\ config/router.json
+    SOURCE_TOOL=$CASE_DIR/source\ archive/scripts/config-parts.sh
+    SOURCE_EVENTS=$CASE_DIR/source-events
+    mkdir -p "$(dirname "$SOURCE_TOOL")"
+    if [ "$source_shape" != missing ]; then
+        cat > "$SOURCE_TOOL" <<'SH'
+#!/bin/sh
+printf 'unexpected source tool call\n' >> "$SOURCE_EVENTS"
+exit 79
+SH
+        case "$source_shape" in readable) source_mode=644 ;; executable) source_mode=755 ;; esac
+        chmod "$source_mode" "$SOURCE_TOOL"
+    fi
+    SB_CONFIG_PARTS_TOOL=$SOURCE_TOOL
+    export SB_CONFIG_PARTS_TOOL SOURCE_EVENTS
     mkdir -p "$INSTALL_DIR/scripts" "$INSTALL_DIR/config"
     cp "$BASE/config/config.template.json" "$INSTALL_DIR/config/"
-    PARTS_EVENTS=$TEST_DIR/parts-install-events; export PARTS_EVENTS
+    PARTS_EVENTS=$CASE_DIR/parts-install-events; export PARTS_EVENTS
     cat > "$INSTALL_DIR/scripts/config-parts.sh" <<'SH'
 #!/bin/sh
 set -eu
 [ "$*" = init ] || exit 80
+[ "$SB_CONFIG_PARTS_TOOL" = "$SH_SINGBOX_HOME/scripts/config-parts.sh" ] || exit 84
+[ "$0" = "$SB_CONFIG_PARTS_TOOL" ] || exit 85
 [ -s "$SH_SINGBOX_CONFIG" ] || exit 81
 for name in xboard local; do [ -s "$SH_SINGBOX_HOME/providers/$name.json" ] || exit 82; done
 [ "$(jq -r '.experimental.clash_api.external_ui' "$SH_SINGBOX_CONFIG")" = "$SH_SINGBOX_HOME/board/dist" ] || exit 83
 printf 'init:%s\n' "$SH_SINGBOX_CONFIG" >> "$PARTS_EVENTS"
 exit "${MOCK_PARTS_INIT_STATUS:-0}"
 SH
-    chmod 0755 "$INSTALL_DIR/scripts/config-parts.sh"
+    chmod 0644 "$INSTALL_DIR/scripts/config-parts.sh"
     deploy_provider_samples
-    initialize_configuration > "$TEST_DIR/parts-install.log"
+    initialize_configuration > "$CASE_DIR/parts-install.log"
     [ "$(cat "$PARTS_EVENTS")" = "init:$CONFIG" ] || fail 'fresh installation did not split the selected external configuration'
-    cp "$CONFIG" "$TEST_DIR/parts-initial-config.json"
-    initialize_configuration > "$TEST_DIR/parts-existing.log"
+    [ ! -e "$SOURCE_EVENTS" ] || fail 'fresh installation invoked the source tool'
+    [ "$(stat -c '%a' "$INSTALL_DIR/scripts/config-parts.sh")" = 644 ] || fail 'initialization changed installed script permissions'
+    cp "$CONFIG" "$CASE_DIR/parts-initial-config.json"
+    mv "$INSTALL_DIR/scripts/config-parts.sh" "$CASE_DIR/saved-installed-tool"
+    initialize_configuration > "$CASE_DIR/parts-existing.log"
     [ "$(wc -l < "$PARTS_EVENTS")" -eq 1 ] || fail 'existing full JSON was automatically migrated'
-    cmp "$TEST_DIR/parts-initial-config.json" "$CONFIG" || fail 'existing JSON changed during install'
+    cmp "$CASE_DIR/parts-initial-config.json" "$CONFIG" || fail 'existing JSON changed during install'
+    mv "$CASE_DIR/saved-installed-tool" "$INSTALL_DIR/scripts/config-parts.sh"
     rm "$CONFIG" "$INSTALL_DIR/providers/xboard.json" "$INSTALL_DIR/providers/local.json"
-    if (MOCK_PARTS_INIT_STATUS=27 initialize_configuration) > "$TEST_DIR/parts-failed.log" 2>&1; then
+    if (MOCK_PARTS_INIT_STATUS=27 initialize_configuration) > "$CASE_DIR/parts-failed.log" 2>&1; then
         fail 'failed initial split was reported as a successful install'
     fi
-    cmp "$TEST_DIR/parts-initial-config.json" "$CONFIG" || fail 'split failure removed or changed the full initial configuration'
+    cmp "$CASE_DIR/parts-initial-config.json" "$CONFIG" || fail 'split failure removed or changed the full initial configuration'
     [ -f "$INSTALL_DIR/providers/xboard.json" ] && [ -f "$INSTALL_DIR/providers/local.json" ] || fail 'split failure removed initial providers'
-    grep -Fq 'sbctl split-config' "$TEST_DIR/parts-failed.log" || fail 'split failure did not provide recovery command'
+    grep -Fq 'sbctl split-config' "$CASE_DIR/parts-failed.log" || fail 'split failure did not provide recovery command'
+    [ ! -e "$SOURCE_EVENTS" ] || fail 'configuration preservation or failure path invoked source tool'
+    if [ "$source_shape" = missing ]; then
+        [ ! -e "$SOURCE_TOOL" ] || fail 'initialization recreated a source tool'
+    else
+        [ "$(stat -c '%a' "$SOURCE_TOOL")" = "$source_mode" ] || fail 'initialization changed source script permissions'
+    fi
+)
+done
+
+# Missing installed tools must fail before seeding either generated JSON or
+# runtime providers, even if an executable tool is advertised by the caller.
+(
+    CASE_DIR=$TEST_DIR/missing-installed-tool
+    INSTALL_DIR=$CASE_DIR/home
+    CONFIG=$CASE_DIR/config.json
+    SB_CONFIG_PARTS_TOOL=$CASE_DIR/source-tool.sh
+    SOURCE_EVENTS=$CASE_DIR/source-events
+    export SB_CONFIG_PARTS_TOOL SOURCE_EVENTS
+    mkdir -p "$INSTALL_DIR/config"
+    cp "$BASE/config/config.template.json" "$INSTALL_DIR/config/"
+    cat > "$SB_CONFIG_PARTS_TOOL" <<'SH'
+#!/bin/sh
+printf 'unexpected source fallback\n' >> "$SOURCE_EVENTS"
+SH
+    chmod 0755 "$SB_CONFIG_PARTS_TOOL"
+    deploy_provider_samples
+    if (initialize_configuration) > "$CASE_DIR/initialize.log" 2>&1; then
+        fail 'fresh install accepted a missing installed tool'
+    fi
+    grep -Fq "Missing or unreadable configuration-parts tool: $INSTALL_DIR/scripts/config-parts.sh" "$CASE_DIR/initialize.log" || fail 'missing installed tool was not identified'
+    [ ! -e "$CONFIG" ] || fail 'missing installed tool left a new configuration'
+    [ ! -e "$INSTALL_DIR/providers/xboard.json" ] && [ ! -e "$INSTALL_DIR/providers/local.json" ] || fail 'missing installed tool initialized runtime providers'
+    [ ! -e "$SOURCE_EVENTS" ] || fail 'missing installed tool fell back to source'
+    [ "$(stat -c '%a' "$SB_CONFIG_PARTS_TOOL")" = 755 ] || fail 'failed install changed source tool permissions'
 )
 
 # Exercise fresh install and recovery with the actual composer. The controller

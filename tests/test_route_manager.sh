@@ -21,9 +21,16 @@ fixture() {
     SH_SINGBOX_CONFIG=$CASE_DIR/live\ config.json
     PARTS=${SH_SINGBOX_CONFIG%.json}.d
     CALL_LOG=$CASE_DIR/sbctl-calls
-    export SH_SINGBOX_HOME SH_SINGBOX_CONFIG CALL_LOG
+    SB_CONFIG_PARTS_TOOL=$CASE_DIR/old-checkout-composer.sh
+    PARTS_SELECTOR_HIT=$CASE_DIR/foreign-composer-called
+    export SH_SINGBOX_HOME SH_SINGBOX_CONFIG CALL_LOG SB_CONFIG_PARTS_TOOL PARTS_SELECTOR_HIT
     unset SB_CONFIG_PARTS_EXPECTED TEST_FAIL_PREFLIGHT
     mkdir -p "$SH_SINGBOX_HOME/config" "$SH_SINGBOX_HOME/scripts" "$SH_SINGBOX_HOME/runtime"
+    cat > "$SB_CONFIG_PARTS_TOOL" <<'SH'
+#!/bin/sh
+: > "$PARTS_SELECTOR_HIT"
+exit 97
+SH
     cp "$BASE/config/config.template.json" "$SH_SINGBOX_HOME/config/config.template.json"
     printf -v ODD_GROUP 'remote;$(touch %s)' "$CASE_DIR/should-not-exist"
     jq --arg odd "$ODD_GROUP" '
@@ -102,7 +109,8 @@ unchanged "$before" 'read operation generated configuration'
 pass 'read-only lists derive actual group tags/types without node or subscription data'
 
 cp "$PARTS/routing.json" "$CASE_DIR/original-routing.json"
-manager add --source 10.23.40.12 --destination 10.88.60.10 --group remote-office --port 14432 --network tcp --protocol tls > "$CASE_DIR/add.log"
+SB_CONFIG_PARTS_TOOL="$CASE_DIR/removed-checkout/config-parts.sh" \
+    manager add --source 10.23.40.12 --destination 10.88.60.10 --group remote-office --port 14432 --network tcp --protocol tls > "$CASE_DIR/add.log"
 jq -e '.route.rules[1]=={action:"route",source_ip_cidr:["10.23.40.12/32"],ip_cidr:["10.88.60.10/32"],outbound:"remote-office",port:[14432],network:["tcp"],protocol:["tls"]}' "$PARTS/routing.json" >/dev/null || fail 'new rule normalization or native field structure'
 manager edit 2 --group remote-home --port 443,8443 > "$CASE_DIR/edit.log"
 jq -e '.route.rules[1].outbound=="remote-home" and .route.rules[1].port==[443,8443] and .route.rules[1].protocol==["tls"]' "$PARTS/routing.json" >/dev/null || fail 'edit changed unspecified fields'
@@ -252,5 +260,10 @@ unchanged "$before" 'display-time stale index deleted another editor rule'
 grep -q 'changed since editing began' "$CASE_DIR/race.log" || fail 'race was not rejected by central expected fingerprint'
 no_secrets "$CASE_DIR/race.log"
 pass 'snapshot fingerprint is captured before interactive indexes and held through confirmation'
+
+for marker in "$TEST_ROOT"/*/foreign-composer-called; do
+    [ ! -e "$marker" ] || fail 'route manager called an inherited foreign composer'
+done
+pass 'route manager binds its sibling composer despite stale/foreign selectors and preserves fingerprint guards'
 
 printf 'All route-manager behavior tests passed (mock core/service; real composition).\n'

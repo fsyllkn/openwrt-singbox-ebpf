@@ -26,8 +26,10 @@ MENU_INPUT=$(dirname -- "$MENU_PATHS")/terminal-input.sh
     exit 1
 }
 . "$MENU_INPUT"
+# Keep this menu's companion tool private. Assignment alone would preserve
+# the export attribute inherited from an older menu or launcher.
+unset SB_CONFIG_PARTS_TOOL
 SB_CONFIG_PARTS_TOOL=$(dirname -- "$MENU_PATHS")/config-parts.sh
-export SB_CONFIG_PARTS_TOOL
 SB_HOME=$SH_SINGBOX_HOME
 GATEWAY=$SB_HOME/scripts/gateway.sh
 CONFIG=$SH_SINGBOX_CONFIG

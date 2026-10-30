@@ -4,6 +4,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+SB_CONFIG_PARTS_TOOL="$SCRIPT_DIR/config-parts.sh"
 [ -r "$SCRIPT_DIR/runtime-paths.sh" ] || {
     echo 'gateway: runtime-paths.sh is missing; deploy the complete scripts directory or rerun install.sh.' >&2
     exit 1
@@ -37,7 +38,6 @@ prepare_config() {
         die "config-parts-lib.sh is missing; deploy the complete scripts directory or rerun install.sh"
     # shellcheck source=config-parts-lib.sh
     . "$SCRIPT_DIR/config-parts-lib.sh"
-    SB_CONFIG_PARTS_TOOL="${SB_CONFIG_PARTS_TOOL:-$SCRIPT_DIR/config-parts.sh}"
     sb_parts_prepare || die "cannot prepare managed configuration; correct the section files first"
     GATEWAY_PARTS_FINGERPRINT=
     if sb_parts_active; then

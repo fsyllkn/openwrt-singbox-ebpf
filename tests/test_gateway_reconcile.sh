@@ -364,14 +364,21 @@ set -eu
 jq -e 'type=="object" and (.inbounds|type=="array")' "$SH_SINGBOX_CONFIG" >/dev/null
 SH
 chmod 0755 "$SH_SINGBOX_HOME/scripts/sbctl"
-export SB_CONFIG_PARTS_TOOL="$BASE/scripts/config-parts.sh"
+PARTS_TOOL="$BASE/scripts/config-parts.sh"
+export SB_CONFIG_PARTS_TOOL="$TMP/old-checkout-composer.sh"
+export PARTS_SELECTOR_HIT="$TMP/foreign-composer-called"
+cat > "$SB_CONFIG_PARTS_TOOL" <<'SH'
+#!/bin/sh
+: > "$PARTS_SELECTOR_HIT"
+exit 97
+SH
 jq '
  .outbounds += [{"type":"socks","tag":"remote-office","server":"192.0.2.20","server_port":1080}]
  | .route.rules=(.route.rules[:3]
       + [{"ip_cidr":["10.77.50.10/32"],"action":"route","outbound":"remote-office"}]
       + .route.rules[3:])
 ' "$BASE/config/config.template.json" > "$SH_SINGBOX_CONFIG"
-bash "$SB_CONFIG_PARTS_TOOL" init > "$TMP/parts-init.log" 2>&1
+bash "$PARTS_TOOL" init > "$TMP/parts-init.log" 2>&1
 PARTS_DIR="${SH_SINGBOX_CONFIG%.json}.d"
 cp "$SH_SINGBOX_CONFIG" "$TMP/parts-generated-before.json"
 cp "$PARTS_DIR/inbounds.json" "$TMP/parts-inbounds-before.json"
@@ -382,9 +389,9 @@ fi
 cmp "$SH_SINGBOX_CONFIG" "$TMP/parts-generated-before.json"
 cmp "$PARTS_DIR/inbounds.json" "$TMP/parts-inbounds-before.json"
 [ ! -f "$SH_SINGBOX_HOME/runtime/gateway.json" ]
-gw configure br-edge.42 10.23.40.0/23
+SB_CONFIG_PARTS_TOOL="$TMP/removed-checkout/config-parts.sh" gw configure br-edge.42 10.23.40.0/23
 jq -e 'any(.inbounds[]; .tag=="lan-tproxy" and .type=="tproxy" and .listen_port==1536)' "$PARTS_DIR/inbounds.json" >/dev/null
-bash "$SB_CONFIG_PARTS_TOOL" render > "$TMP/parts-render.log" 2>&1
+bash "$PARTS_TOOL" render > "$TMP/parts-render.log" 2>&1
 jq -e --slurpfile source "$PARTS_DIR/inbounds.json" '.inbounds==$source[0].inbounds' "$SH_SINGBOX_CONFIG" >/dev/null
 cmp "$PARTS_DIR/routing.json" "$TMP/parts-routing-before.json"
 gw apply
@@ -410,9 +417,11 @@ cmp "$SH_SINGBOX_CONFIG" "$TMP/parts-generated-valid.json"
 cmp "$SH_SINGBOX_HOME/runtime/gateway.json" "$TMP/parts-settings-valid.json"
 cp "$TMP/parts-inbounds-valid.json" "$PARTS_DIR/inbounds.json"
 gw disable
-bash "$SB_CONFIG_PARTS_TOOL" render > "$TMP/parts-disable-render.log" 2>&1
+bash "$PARTS_TOOL" render > "$TMP/parts-disable-render.log" 2>&1
 jq -e 'all(.inbounds[]; .tag!="lan-tproxy")' "$PARTS_DIR/inbounds.json" >/dev/null
 jq -e 'all(.inbounds[]; .tag!="lan-tproxy")' "$SH_SINGBOX_CONFIG" >/dev/null
 cmp "$PARTS_DIR/routing.json" "$TMP/parts-routing-before.json"
 [ ! -f "$SH_SINGBOX_HOME/runtime/gateway.json" ]
+[ ! -e "$PARTS_SELECTOR_HIT" ] || { echo 'Gateway called an inherited foreign composer' >&2; exit 1; }
+echo 'PASS gateway uses its sibling composer despite inherited stale/foreign selectors'
 echo 'Gateway ownership and stale-rule recovery tests passed.'

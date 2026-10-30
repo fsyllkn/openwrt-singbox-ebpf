@@ -9,7 +9,7 @@ SCRIPT_DIR="$(dirname "$SCRIPT_FILE")"
 sb_load_paths || exit 1
 . "$SCRIPT_DIR/config-parts-lib.sh"
 . "$SCRIPT_DIR/terminal-input.sh"
-SB_CONFIG_PARTS_TOOL="${SB_CONFIG_PARTS_TOOL:-$SCRIPT_DIR/config-parts.sh}"
+SB_CONFIG_PARTS_TOOL="$SCRIPT_DIR/config-parts.sh"
 umask 077
 
 HOME_DIR="$SH_SINGBOX_HOME"

@@ -9,7 +9,9 @@ for RM_HELPER in runtime-paths.sh config-parts-lib.sh terminal-input.sh; do
     . "$RM_SCRIPT_DIR/$RM_HELPER"
 done
 sb_load_paths
-SB_CONFIG_PARTS_TOOL=${SB_CONFIG_PARTS_TOOL:-$RM_SCRIPT_DIR/config-parts.sh}
+# Executable helpers use the composer deployed alongside them, not a selector
+# inherited from a source-checkout menu or another installation.
+SB_CONFIG_PARTS_TOOL=$RM_SCRIPT_DIR/config-parts.sh
 RM_PARTS=$(sb_parts_dir)
 
 fail() { printf 'route-manager: %s\n' "$*" >&2; exit 1; }

@@ -20,7 +20,11 @@ TMP_DIR=
 UPDATE_CONFIG=
 UPDATE_CONFIG_MODE=
 UPDATE_CONFIG_FINGERPRINT=
-PARTS_TOOL=${SB_CONFIG_PARTS_TOOL:-$SERVICE_DIR/scripts/config-parts.sh}
+# Core updates validate the installed service with its deployed composer.
+# A source menu/controller may still export a selector from another checkout.
+PARTS_TOOL=$SERVICE_DIR/scripts/config-parts.sh
+SB_CONFIG_PARTS_TOOL=$PARTS_TOOL
+export SB_CONFIG_PARTS_TOOL
 
 ok()   { echo -e "\033[32m✓\033[0m $*"; }
 err()  { echo -e "\033[31m✗\033[0m $*" >&2; }
@@ -151,15 +155,15 @@ stage_update_config() {
             err "Generated configuration is missing or unreadable. Run 'sbctl preflight' with the current core to rebuild it before updating the core."
             return 1
         }
-        [ -x "$PARTS_TOOL" ] || { err "Missing configuration-parts tool: $PARTS_TOOL; update the installed scripts first"; return 1; }
-        before=$("$PARTS_TOOL" fingerprint) || return 1
+        [ -f "$PARTS_TOOL" ] && [ -r "$PARTS_TOOL" ] || { err "Missing or unreadable installed configuration-parts tool: $PARTS_TOOL; update the installed scripts first"; return 1; }
+        before=$(bash "$PARTS_TOOL" fingerprint) || return 1
         UPDATE_CONFIG=$TMP_DIR/config-candidate.json
-        "$PARTS_TOOL" build "$UPDATE_CONFIG" || return 1
+        bash "$PARTS_TOOL" build "$UPDATE_CONFIG" || return 1
         jq -e -s 'length == 2 and .[0] == .[1]' "$SH_SINGBOX_CONFIG" "$UPDATE_CONFIG" >/dev/null || {
             err "Configuration sources contain an unapplied draft or policy change. Run 'sbctl preflight' with the current core before updating the core."
             return 1
         }
-        after=$("$PARTS_TOOL" fingerprint) || return 1
+        after=$(bash "$PARTS_TOOL" fingerprint) || return 1
         [ "$before" = "$after" ] || { err "Configuration changed while staging the core update; retry after finishing the edit"; return 1; }
         UPDATE_CONFIG_FINGERPRINT=$after
     elif [ -e "$SH_SINGBOX_CONFIG" ] || [ -L "$SH_SINGBOX_CONFIG" ]; then
@@ -180,11 +184,11 @@ verify_update_config_unchanged() {
     case "$UPDATE_CONFIG_MODE" in
         parts)
             sb_parts_active || return 1
-            current=$("$PARTS_TOOL" fingerprint) || return 1
+            current=$(bash "$PARTS_TOOL" fingerprint) || return 1
             [ "$current" = "$UPDATE_CONFIG_FINGERPRINT" ] || return 1
-            "$PARTS_TOOL" build "$TMP_DIR/config-recheck.json" || return 1
+            bash "$PARTS_TOOL" build "$TMP_DIR/config-recheck.json" || return 1
             jq -e -s 'length == 2 and .[0] == .[1]' "$UPDATE_CONFIG" "$TMP_DIR/config-recheck.json" >/dev/null || return 1
-            current=$("$PARTS_TOOL" fingerprint) || return 1
+            current=$(bash "$PARTS_TOOL" fingerprint) || return 1
             [ "$current" = "$UPDATE_CONFIG_FINGERPRINT" ] ;;
         legacy)
             ! sb_parts_active && [ -f "$SH_SINGBOX_CONFIG" ] || return 1
