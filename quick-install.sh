@@ -381,6 +381,7 @@ validate_source() {
     [ -f "$1/uninstall.sh" ] &&
     [ -f "$1/scripts/sbctl" ] &&
     [ -f "$1/scripts/runtime-paths.sh" ] &&
+    [ -f "$1/scripts/terminal-input.sh" ] &&
     [ -f "$1/scripts/download.sh" ] &&
     [ -f "$1/scripts/configure-download.sh" ] &&
     [ -f "$1/scripts/config-parts-lib.sh" ] &&

@@ -4,7 +4,7 @@
 set -euo pipefail
 umask 077
 RM_SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
-for RM_HELPER in runtime-paths.sh config-parts-lib.sh; do
+for RM_HELPER in runtime-paths.sh config-parts-lib.sh terminal-input.sh; do
     [ -r "$RM_SCRIPT_DIR/$RM_HELPER" ] || { printf 'route-manager: missing %s; deploy the complete scripts directory.\n' "$RM_HELPER" >&2; exit 1; }
     . "$RM_SCRIPT_DIR/$RM_HELPER"
 done
@@ -281,8 +281,7 @@ mutate() (
 )
 
 prompt() {
-    printf '%s' "$1"
-    if ! IFS= read -r RM_REPLY; then info ''; info '输入结束，已取消。'; return 2; fi
+    if ! sb_read_line RM_REPLY "$1"; then info ''; info '输入结束，已取消。'; return 2; fi
 }
 confirm() {
     prompt "$1 [Y/n]: " || return 2

@@ -31,7 +31,7 @@ with tempfile.TemporaryDirectory(prefix='sb-public-bootstrap-') as directory:
     for name in ('quick-install.sh', 'install.sh', 'uninstall.sh', 'README.md'):
         shutil.copyfile(base / name, archive_source / name)
     (archive_source / 'menu.sh').write_text('#!/bin/sh\nexit 0\n')
-    for name in ('sbctl', 'runtime-paths.sh', 'download.sh', 'configure-download.sh', 'config-parts-lib.sh', 'config-parts.sh', 'route-manager.sh', 'gateway.sh', 'dns-guard.sh', 'update-core.sh'):
+    for name in ('sbctl', 'runtime-paths.sh', 'terminal-input.sh', 'download.sh', 'configure-download.sh', 'config-parts-lib.sh', 'config-parts.sh', 'route-manager.sh', 'gateway.sh', 'dns-guard.sh', 'update-core.sh'):
         shutil.copyfile(base / 'scripts' / name, archive_source / 'scripts' / name)
     shutil.copyfile(base / 'openwrt/sing-box.init', archive_source / 'openwrt/sing-box.init')
     (archive_source / 'config/config.template.json').write_text('{"public_template":true}\n')
@@ -96,7 +96,7 @@ pathlib.Path(output).write_bytes(pathlib.Path(os.environ['BOOT_ARCHIVE']).read_b
         if name == 'http':
             assert call['no_proxy'] == '', 'Explicit HTTP mode silently bypassed selected proxy'
         assert (target / 'scripts/download.sh').is_file(), 'Shared downloader was not deployed'
-        for helper in ('config-parts-lib.sh', 'config-parts.sh', 'route-manager.sh'):
+        for helper in ('config-parts-lib.sh', 'config-parts.sh', 'route-manager.sh', 'terminal-input.sh'):
             assert (target / 'scripts' / helper).read_bytes() == (archive_source / 'scripts' / helper).read_bytes(), f'Required helper was not deployed: {helper}'
         assert not (target / 'config/config.json').exists(), 'Bootstrap copied the source config over a device config location'
         assert not (target / 'providers/downloaded.json').exists(), 'Bootstrap copied a provider cache'
@@ -139,7 +139,7 @@ pathlib.Path(output).write_bytes(pathlib.Path(os.environ['BOOT_ARCHIVE']).read_b
     result = subprocess.run(['sh', str(bootstrap), '--archive', str(archive), '--no-menu'], env=dict(env, SB_INSTALL_SOURCE_DIR=str(offline), SB_DOWNLOAD_MODE='invalid-saved-settings'), capture_output=True, text=True)
     assert result.returncode == 0, 'Offline bootstrap unexpectedly depended on download settings'
     assert not (root / 'download-log').exists(), 'Offline bootstrap invoked a downloader'
-    for index, missing in enumerate(('examples/local.sample.json', 'scripts/config-parts-lib.sh', 'scripts/config-parts.sh', 'scripts/route-manager.sh')):
+    for index, missing in enumerate(('examples/local.sample.json', 'scripts/config-parts-lib.sh', 'scripts/config-parts.sh', 'scripts/route-manager.sh', 'scripts/terminal-input.sh')):
         incomplete_source = root / f'incomplete-source-{index}'
         shutil.copytree(archive_source, incomplete_source)
         (incomplete_source / missing).unlink()
@@ -171,6 +171,7 @@ pathlib.Path(output).write_bytes(pathlib.Path(os.environ['BOOT_ARCHIVE']).read_b
     assert result.returncode == 0, f'Previous bootstrap whitelist produced incomplete current source: {result.stderr}'
     assert not (root / 'download-log').exists(), 'Legacy source required an unexpected online repair'
     assert (legacy / 'scripts/route-manager.sh').read_bytes() == (archive_source / 'scripts/route-manager.sh').read_bytes(), 'Previous bootstrap whitelist lost the route manager'
+    assert (legacy / 'scripts/terminal-input.sh').read_bytes() == (archive_source / 'scripts/terminal-input.sh').read_bytes(), 'Previous bootstrap whitelist lost terminal input helper'
     for provider in ('xboard', 'local'):
         assert (legacy / 'examples' / (provider + '.sample.json')).is_file(), 'Previous whitelist lost required sample'
         assert not (legacy / 'providers' / (provider + '.json')).exists(), 'Previous whitelist imported a runtime provider'

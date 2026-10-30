@@ -4,12 +4,18 @@ set -eu
 BASE=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 python3 - "$BASE" <<'PY'
 from pathlib import Path
+import errno
 import os
+import pty
 import re
+import select
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import termios
+import time
 
 
 base = Path(sys.argv[1])
@@ -42,7 +48,8 @@ with tempfile.TemporaryDirectory(prefix="sb-menu-navigation-") as directory:
     provider.write_text('{"fixture":"preserve existing provider"}\n')
     original_config = config.read_bytes()
     original_provider = provider.read_bytes()
-    for name in ("runtime-paths.sh", "config-parts-lib.sh", "config-parts.sh", "download.sh"):
+    for name in ("runtime-paths.sh", "config-parts-lib.sh", "config-parts.sh", "download.sh",
+                 "terminal-input.sh"):
         shutil.copyfile(base / "scripts" / name, checkout / "scripts" / name)
         shutil.copyfile(base / "scripts" / name, home / "scripts" / name)
     script(tools / "id", '#!/bin/sh\n[ "$*" = -u ] || exit 80\necho 0\n')
@@ -175,7 +182,7 @@ diagnose() { printf 'diagnose\\n' >> "$TEST_EVENTS"; }
         "routes:installed:menu",
     ]
     assert calls == expected, (calls, expected, output)
-    for heading, minimum in (("【服务管理】", 7), ("【LAN 接入】", 6),
+    for heading, minimum in (("【服务管理】", 7), ("【LAN透明网关设置】", 6),
                              ("【配置与隐私】", 6), ("【安装与更新】", 6),
                              ("【诊断与维护】", 5)):
         assert output.count(heading) == minimum, (heading, output.count(heading))
@@ -232,6 +239,108 @@ diagnose() { printf 'diagnose\\n' >> "$TEST_EVENTS"; }
     assert calls == []
     assert output.count("reF1nd sing-box / OpenWrt SSH 管理菜单") == 151
     print("PASS repeated category transitions use iterative navigation without nested menu stacks")
+
+    def run_pty_menu(steps, terminal_erase, backend):
+        # A real controlling terminal exercises editing in the actual sh menu;
+        # piping control bytes through stdin would bypass the interactive path.
+        events.write_text("")
+        child, terminal = pty.fork()
+        if child == 0:
+            settings = termios.tcgetattr(0)
+            settings[6][termios.VERASE] = terminal_erase
+            termios.tcsetattr(0, termios.TCSANOW, settings)
+            os.execvpe("sh", ["sh", str(menu)],
+                       {**env, "TERM": "xterm", "SB_TERMINAL_INPUT_BACKEND": backend})
+
+        transcript = bytearray()
+        position = 0
+        deadline = time.monotonic() + 20
+        reaped = False
+
+        def read_output():
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, ("PTY menu timed out", bytes(transcript[-3000:]))
+            ready, _, _ = select.select([terminal], [], [], remaining)
+            assert ready, ("PTY menu timed out", bytes(transcript[-3000:]))
+            try:
+                chunk = os.read(terminal, 65536)
+            except OSError as error:
+                if error.errno == errno.EIO:
+                    return False  # Linux PTY reports EIO after its slave closes.
+                raise
+            transcript.extend(chunk)
+            return bool(chunk)
+
+        try:
+            for prompt, keys in steps:
+                marker = prompt.encode()
+                while True:
+                    found = transcript.find(marker, position)
+                    if found >= 0:
+                        position = found + len(marker)
+                        break
+                    assert read_output(), ("PTY exited before prompt", prompt,
+                                           bytes(transcript[-3000:]))
+                os.write(terminal, keys)
+            while read_output():
+                pass
+            _, status = os.waitpid(child, 0)
+            reaped = True
+            assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, bytes(transcript)
+        finally:
+            if not reaped:
+                try:
+                    os.killpg(child, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                os.waitpid(child, 0)
+            os.close(terminal)
+
+        calls = events.read_text().splitlines()
+        assert not any(line.startswith("FORBIDDEN:") for line in calls), calls
+        output = transcript.decode(errors="replace")
+        assert "^H" not in output and "^?" not in output, output
+        return output, calls
+
+    primary_prompt = "请选择分类："
+    secondary_prompt = "请选择："
+    continue_prompt = "按回车继续..."
+    restart_prompt = "Restart sing-box? Proxy connections will briefly disconnect. [Y/n]: "
+    stop_prompt = "Stop sing-box and remove gateway rules? [Y/n]: "
+    # Exercise both key codes regardless of the terminal's original VERASE,
+    # through both Readline and the fallback used before Bash is installed.
+    # Corrected empty confirmation approves; corrected n cancels the stop.
+    for backend, terminal_erase in (("auto", b"\x08"), ("auto", b"\x7f"),
+                                    ("raw", b"\x08"), ("raw", b"\x7f")):
+        output, calls = run_pty_menu([
+            (primary_prompt, b"9\x081\n"),
+            (secondary_prompt, b"9\x7f3\n"),
+            (restart_prompt, b"n\x08\n"),
+            (continue_prompt, b"\n"),
+            (secondary_prompt, b"8\x084\n"),
+            (stop_prompt, b"y\x7fn\n"),
+            (continue_prompt, b"\n"),
+            (secondary_prompt, b"0\n"),
+            (primary_prompt, b"8\x7f3\n"),
+            (secondary_prompt, b"7\x082\n"),
+            (continue_prompt, b"\n"),
+            (secondary_prompt, b"0\n"),
+            (primary_prompt, b"0\n"),
+        ], terminal_erase, backend)
+        assert calls == ["sbctl:check-xtunnel", "sbctl:restart", "gateway:status"], calls
+        assert "【LAN透明网关设置】" in output
+        assert "无效分类" not in output and "无效选项" not in output
+
+        # Ctrl-D after deleting a typed y is cancellation, never an empty yes.
+        _, calls = run_pty_menu([
+            (primary_prompt, b"1\n"),
+            (secondary_prompt, b"3\n"),
+            (restart_prompt, b"y" + terminal_erase + b"\x04"),
+            (continue_prompt, b"\x04"),
+        ], terminal_erase, backend)
+        assert calls == [], calls
+    assert config.read_bytes() == original_config and provider.read_bytes() == original_provider
+    print("PASS real PTY Readline/raw: BS/DEL correct choices and confirmations; Ctrl-D cancels")
 
 print("Two-level menu navigation and confirmation tests passed.")
 PY

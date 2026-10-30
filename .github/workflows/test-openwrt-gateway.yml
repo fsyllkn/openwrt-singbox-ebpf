@@ -57,6 +57,8 @@ jobs:
           test -f "$archive_root/scripts/config-parts.sh"
           test -f "$archive_root/scripts/config-parts-lib.sh"
           test -f "$archive_root/scripts/route-manager.sh"
+          test -f "$archive_root/scripts/terminal-input.sh"
+          sh -n "$archive_root/scripts/terminal-input.sh"
           test -f "$archive_root/examples/config-routing.sample.json"
           echo 'Anonymous public bootstrap and source archive match this checkout.'
           # Also verify the floating entry points used by the SSH instructions,
@@ -76,6 +78,8 @@ jobs:
           test ! -e "$main_root/providers/xboard.json"
           test -f "$main_root/examples/xboard.sample.json"
           test -f "$main_root/examples/local.sample.json"
+          test -f "$main_root/scripts/terminal-input.sh"
+          sh -n "$main_root/scripts/terminal-input.sh"
           echo 'Anonymous main bootstrap and source archive are available.'
       - name: Shell syntax
         run: |
@@ -86,14 +90,18 @@ jobs:
           sh -n tests/test_procd_ubus.sh
           sh -n openwrt/sing-box.init
           sh -n menu.sh
-          sh -n scripts/runtime-paths.sh scripts/download.sh scripts/configure-download.sh
+          sh -n scripts/runtime-paths.sh scripts/download.sh scripts/configure-download.sh scripts/terminal-input.sh
           bash -n install.sh uninstall.sh
           sh -n quick-install.sh
           for script in scripts/*.sh tests/*.sh; do bash -n "$script"; done
-      - name: Validate hierarchical SSH menus and Enter-to-confirm behavior
+      - name: Validate SSH menus, backspace editing and Enter-to-confirm behavior
         run: |
+          if ! command -v busybox >/dev/null 2>&1; then sudo apt-get update -qq && sudo apt-get install -y -qq busybox; fi
+          busybox_path=$(command -v busybox)
+          test -x "$busybox_path"
           python3 tests/test_menu_layout.py
           sh tests/test_menu_navigation.sh
+          SB_TEST_BUSYBOX="$busybox_path" python3 tests/test_terminal_input.py
       - name: Verify procd benign service deletion and preserve real errors
         run: sh tests/test_procd_ubus.sh
       - name: Verify runtime config paths, fresh LAN bind checks and offline script deployment

@@ -37,7 +37,7 @@ class ConfigPartsIntegration(unittest.TestCase):
                      self.home / "runtime", self.home / "providers", self.config.parent,
                      self.tools):
             path.mkdir(parents=True, exist_ok=True)
-        for name in ("sbctl", "runtime-paths.sh", "config-parts.sh", "config-parts-lib.sh", "route-manager.sh"):
+        for name in ("sbctl", "runtime-paths.sh", "config-parts.sh", "config-parts-lib.sh", "route-manager.sh", "terminal-input.sh"):
             shutil.copyfile(ROOT / "scripts" / name, self.home / "scripts" / name)
         self.cli = self.home / "scripts" / "sbctl"
         # Select only the fixture's systemctl even if this test runs on OpenWrt.

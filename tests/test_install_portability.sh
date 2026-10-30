@@ -307,7 +307,7 @@ BOOT_TARGET=$TEST_DIR/bootstrap\ target
 mkdir -p "$BOOT_SOURCE/scripts" "$BOOT_SOURCE/openwrt" "$BOOT_SOURCE/config" "$BOOT_SOURCE/examples" \
     "$BOOT_SOURCE/providers" "$BOOT_TARGET/config" "$BOOT_TARGET/providers"
 for file in README.md quick-install.sh install.sh uninstall.sh; do cp "$BASE/$file" "$BOOT_SOURCE/$file"; done
-for file in sbctl runtime-paths.sh download.sh configure-download.sh config-parts-lib.sh config-parts.sh route-manager.sh gateway.sh dns-guard.sh update-core.sh; do
+for file in sbctl runtime-paths.sh terminal-input.sh download.sh configure-download.sh config-parts-lib.sh config-parts.sh route-manager.sh gateway.sh dns-guard.sh update-core.sh; do
     cp "$BASE/scripts/$file" "$BOOT_SOURCE/scripts/$file"
 done
 cp "$BASE/openwrt/sing-box.init" "$BOOT_SOURCE/openwrt/"
@@ -334,6 +334,7 @@ PATH="$TEST_DIR/bin:$PATH" SB_INSTALL_SOURCE_DIR="$BOOT_TARGET" \
 cmp "$TEST_DIR/bootstrap-config-before" "$BOOT_TARGET/config/config.json" || fail 'bootstrap overwrote device config'
 cmp "$TEST_DIR/bootstrap-provider-before" "$BOOT_TARGET/providers/private.json" || fail 'bootstrap overwrote device provider'
 cmp "$BASE/scripts/route-manager.sh" "$BOOT_TARGET/scripts/route-manager.sh" || fail 'bootstrap omitted route manager from source snapshot'
+cmp "$BASE/scripts/terminal-input.sh" "$BOOT_TARGET/scripts/terminal-input.sh" || fail 'bootstrap omitted terminal input helper from source snapshot'
 sh "$TEST_DIR/sb-launcher"
 [ "$(cat "$TEST_MENU_LOG")" = "$BOOT_TARGET/menu.sh" ] || fail 'launcher failed to quote spaced source path'
 # A symlink spelling of the same checkout must not trigger self-copy errors.

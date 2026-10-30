@@ -79,8 +79,8 @@ prepare_case() {
     printf '{"test":"source runtime local must never be imported"}\n' > "$CASE_SOURCE/providers/local.json"
     for file in "$CASE_SOURCE"/scripts/*; do
         [ -f "$file" ] || continue
-        # Upgrade a version that did not yet ship the route manager.
-        [ "$(basename "$file")" != route-manager.sh ] || continue
+        # Upgrade a version that did not yet ship these interactive helpers.
+        case "$(basename "$file")" in route-manager.sh|terminal-input.sh) continue ;; esac
         printf '#!/bin/sh\n# old installed %s\n' "$(basename "$file")" > "$CASE_HOME/scripts/$(basename "$file")"
     done
     printf '#!/bin/sh\n# existing menu\n' > "$CASE_HOME/scripts/menu.sh"
@@ -201,7 +201,7 @@ cmp "$CASE_DIR/before/sing-box.init" "$CASE_INIT" || fail 'incomplete source mod
 cmp "$CASE_DIR/before/external-config.json" "$CASE_CONFIG" || fail 'incomplete source modified external config'
 [ ! -e "$MUTATION_LOG" ] || fail 'incomplete source invoked network/core/service command'
 
-for missing_helper in download.sh configure-download.sh config-parts-lib.sh config-parts.sh route-manager.sh; do
+for missing_helper in download.sh configure-download.sh config-parts-lib.sh config-parts.sh route-manager.sh terminal-input.sh; do
     prepare_case "missing-$missing_helper"
     rm "$CASE_SOURCE/scripts/$missing_helper"
     if bash "$TEST_DIR/runner.sh" > "$CASE_DIR/output.log" 2>&1; then
@@ -247,6 +247,7 @@ for shape in pending broken missing_output dangling_parts; do
     fi
     diff -r "$CASE_DIR/before-parts-backup" "$parts_dir.backup.previous" || fail 'offline repair changed a previous user routing backup'
     cmp "$CASE_SOURCE/scripts/route-manager.sh" "$CASE_HOME/scripts/route-manager.sh" || fail 'offline repair omitted route manager'
+    cmp "$CASE_SOURCE/scripts/terminal-input.sh" "$CASE_HOME/scripts/terminal-input.sh" || fail 'offline repair omitted terminal input helper'
     cmp "$CASE_DIR/before/installed/providers/xboard.json" "$CASE_HOME/providers/xboard.json" || fail 'offline repair changed existing runtime provider'
     [ ! -e "$CASE_HOME/providers/local.json" ] || fail 'offline repair initialized a dummy provider cache'
     [ ! -e "$MUTATION_LOG" ] || fail 'offline parts repair invoked network/core/service'

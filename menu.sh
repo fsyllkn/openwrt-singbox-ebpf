@@ -20,6 +20,12 @@ MENU_PARTS=$(dirname -- "$MENU_PATHS")/config-parts-lib.sh
     exit 1
 }
 . "$MENU_PARTS"
+MENU_INPUT=$(dirname -- "$MENU_PATHS")/terminal-input.sh
+[ -r "$MENU_INPUT" ] || {
+    echo 'Missing terminal-input.sh; deploy the complete updated scripts directory.' >&2
+    exit 1
+}
+. "$MENU_INPUT"
 SB_CONFIG_PARTS_TOOL=$(dirname -- "$MENU_PATHS")/config-parts.sh
 export SB_CONFIG_PARTS_TOOL
 SB_HOME=$SH_SINGBOX_HOME
@@ -64,12 +70,11 @@ REPO_DIR=$(find_source_dir)
 
 say() { printf '%s\n' "$*"; }
 ask() {
-    printf '%s [Y/n]: ' "$1"
-    IFS= read -r answer || return 1
+    sb_read_line answer "$1 [Y/n]: " || return 1
     case "$answer" in ''|y|Y|yes|YES) return 0;; esac
     return 1
 }
-wait_key() { printf '\n按回车继续...'; IFS= read -r unused; }
+wait_key() { printf '\n'; sb_read_line unused '按回车继续...'; }
 root_only() { [ "$(id -u)" -eq 0 ] || { say 'Requires root.'; return 1; }; }
 load_download_library() {
     download_library=$REPO_DIR/scripts/download.sh
@@ -140,8 +145,7 @@ edit_config_part() (
     say '5) settings：面板、日志等其他设置'
     say '6) 查看运行配置路径与状态'
     say '0) 返回'
-    printf '选择要编辑的部分：'
-    IFS= read -r part_choice || exit 1
+    sb_read_line part_choice '选择要编辑的部分：' || exit 1
     case "$part_choice" in
         1) part_name=providers ;;
         2) part_name=inbounds ;;
@@ -182,8 +186,7 @@ manage_config_parts() {
     say '2) 保留完整运行 JSON，归档分文件并返回单文件模式'
     say '0) 返回'
     say '这两项都不会重启服务；自定义 DNS 或规则顺序不能无损拆分时会保留原配置。'
-    printf '选择：'
-    IFS= read -r layout_choice || return
+    sb_read_line layout_choice '选择：' || return
     case "$layout_choice" in
         1) run_sbctl split-config ;;
         2) run_sbctl single-config ;;
@@ -300,23 +303,17 @@ configure_gateway() {
     ip -4 route show default
     ip -4 -o addr show scope global
     default_interface=$(gateway_default_interface) || default_interface=
-    if [ -n "$default_interface" ]; then
-        printf 'LAN interface [%s]: ' "$default_interface"
-    else
+    if [ -z "$default_interface" ]; then
         say 'No unique LAN interface detected; choose the LAN device from the addresses above.'
-        printf 'LAN interface: '
     fi
-    IFS= read -r interface || return
+    sb_read_line interface "LAN interface${default_interface:+ [$default_interface]}: " || return
     interface=${interface:-$default_interface}
     [ -n "$interface" ] || { say 'No LAN interface selected; gateway configuration unchanged.'; return 1; }
     default_cidr=$(gateway_default_cidr "$interface") || default_cidr=
-    if [ -n "$default_cidr" ]; then
-        printf 'LAN subnet CIDR [%s]: ' "$default_cidr"
-    else
+    if [ -z "$default_cidr" ]; then
         say 'No unique IPv4 LAN subnet detected; enter the actual subnet/prefix explicitly.'
-        printf 'LAN subnet CIDR: '
     fi
-    IFS= read -r cidr || return
+    sb_read_line cidr "LAN subnet CIDR${default_cidr:+ [$default_cidr]}: " || return
     cidr=${cidr:-$default_cidr}
     [ -n "$cidr" ] || { say 'No subnet selected; gateway configuration unchanged.'; return 1; }
     ask "Configure gateway for $interface / $cidr? Does not enable it until restart." || return
@@ -404,8 +401,7 @@ source_update() {
         sb_download_run git -C "$REPO_DIR" pull --ff-only || return
     else
         say '在线更新使用 openwrt-singbox-ebpf 公开仓库 main 分支及当前下载代理设置。'
-        printf '离线 ZIP/TAR.GZ 路径（回车直接在线更新）: '
-        IFS= read -r archive || return
+        sb_read_line archive '离线 ZIP/TAR.GZ 路径（回车直接在线更新）: ' || return
         ask '更新本地 OpenWrt 源码？不会重启服务。' || return
         if [ -n "$archive" ]; then
             SB_INSTALL_SOURCE_DIR="$REPO_DIR" sh "$REPO_DIR/quick-install.sh" --update --archive "$archive" --no-menu || return
@@ -428,8 +424,7 @@ configure_download_proxy() {
     say '2) 使用本地/局域网 HTTP 代理'
     say '3) 使用公开 GitHub 下载代理前缀'
     say '0) 返回'
-    printf '选择下载方式: '
-    IFS= read -r proxy_choice || return
+    sb_read_line proxy_choice '选择下载方式: ' || return
     case "$proxy_choice" in
         1) sh "$proxy_tool" set direct || return ;;
         2|3)
@@ -438,15 +433,7 @@ configure_download_proxy() {
                 3) proxy_mode=github; say '输入可信 GitHub 下载代理前缀，例如 https://ghfast.top/。输入不会回显。' ;;
             esac
             if ! (
-                tty_state=
-                if [ -t 0 ]; then
-                    tty_state=$(stty -g) || exit 1
-                    trap 'stty "$tty_state"' EXIT HUP INT TERM
-                    stty -echo || exit 1
-                fi
-                printf 'URL: ' >&2
-                IFS= read -r proxy_url || exit 1
-                printf '\n' >&2
+                sb_read_line proxy_url 'URL: ' --secret || exit 1
                 printf '%s\n' "$proxy_url" | sh "$proxy_tool" set "$proxy_mode" --stdin
             ); then return 1; fi
             ;;
@@ -589,7 +576,7 @@ show_menu() {
     say '----------------------------------------------'
     say '   1) 服务管理'
     say '   2) 特色路由'
-    say '   3) LAN 接入'
+    say '   3) LAN透明网关设置'
     say '   4) 配置与隐私'
     say '   5) 安装与更新'
     say '   6) 诊断与维护'
@@ -610,7 +597,7 @@ show_submenu() {
             say '   6) 配置校验'
             ;;
         lan)
-            say ' 【LAN 接入】'
+            say ' 【LAN透明网关设置】'
             say '   1) 设置 LAN 透明网关'
             say '   2) 查看网关状态'
             say '   3) 关闭 LAN 透明网关'
@@ -651,8 +638,8 @@ run_submenu() {
     submenu_section=$1
     while :; do
         show_submenu "$submenu_section"
-        printf '\n请选择：'
-        IFS= read -r submenu_choice || return 2
+        printf '\n'
+        sb_read_line submenu_choice '请选择：' || return 2
         case "$submenu_choice" in
             0) return 0 ;;
             q|Q) return 2 ;;
@@ -692,8 +679,8 @@ run_submenu() {
 
 while :; do
     show_menu
-    printf '\n请选择分类：'
-    IFS= read -r choice || break
+    printf '\n'
+    sb_read_line choice '请选择分类：' || break
     menu_status=0
     case "$choice" in
         1) run_submenu service || menu_status=$? ;;

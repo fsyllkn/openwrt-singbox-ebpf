@@ -8,6 +8,7 @@ SCRIPT_DIR="$(dirname "$SCRIPT_FILE")"
 . "$SCRIPT_DIR/runtime-paths.sh"
 sb_load_paths || exit 1
 . "$SCRIPT_DIR/config-parts-lib.sh"
+. "$SCRIPT_DIR/terminal-input.sh"
 SB_CONFIG_PARTS_TOOL="${SB_CONFIG_PARTS_TOOL:-$SCRIPT_DIR/config-parts.sh}"
 umask 077
 
@@ -62,7 +63,7 @@ if [ "$action" = configure ]; then
     echo 'Configure a LAN-only authenticated HTTP/SOCKS5 proxy.'
     echo 'The listen IP must be an IPv4 address currently assigned to this OpenWrt router.'
     ip -4 -o addr show scope global
-    read -r -p "LAN listen IPv4${current_listen:+ [$current_listen]}: " listen
+    sb_read_line listen "LAN listen IPv4${current_listen:+ [$current_listen]}: "
     listen=${listen:-$current_listen}
     [[ "$listen" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
         die 'Invalid IPv4 address'
@@ -82,7 +83,7 @@ if [ "$action" = configure ]; then
         die 'This IP is not assigned to the router; choose a real LAN interface address'
 
     current_port=${current_port:-7891}
-    read -r -p "Port [$current_port]: " port
+    sb_read_line port "Port [$current_port]: "
     port="${port:-$current_port}"
     [[ "$port" =~ ^[0-9]{1,5}$ ]] && (( 10#$port >= 1024 && 10#$port <= 65535 )) ||
         die 'Port must be 1024..65535'
@@ -101,11 +102,10 @@ if [ "$action" = configure ]; then
     if [ "$port_conflict" = true ]; then
         die 'Port conflicts with another configured listener or a SOCKS backend at this address; choose an unused port.'
     fi
-    read -r -p 'Proxy username (updates this user; preserves other users): ' username
+    sb_read_line username 'Proxy username (updates this user; preserves other users): '
     [[ "$username" =~ ^[a-zA-Z0-9_.-]{1,32}$ ]] ||
         die 'Username must be 1-32 safe ASCII characters'
-    read -r -s -p 'Proxy password (minimum 12 characters): ' password
-    printf '\n'
+    sb_read_line password 'Proxy password (minimum 12 characters): ' --secret
     [ "${#password}" -ge 12 ] || die 'Password too short'
 
     # Passing passwords to jq --arg would expose them in /proc/PID/cmdline.

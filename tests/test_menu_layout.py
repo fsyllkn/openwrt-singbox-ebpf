@@ -9,7 +9,7 @@ MENU = (Path(__file__).resolve().parents[1] / "menu.sh").read_text(encoding="utf
 TOP_LEVEL = {
     1: ("服务管理", "run_submenu service"),
     2: ("特色路由", "manage_routes"),
-    3: ("LAN 接入", "run_submenu lan"),
+    3: ("LAN透明网关设置", "run_submenu lan"),
     4: ("配置与隐私", "run_submenu config"),
     5: ("安装与更新", "run_submenu install"),
     6: ("诊断与维护", "run_submenu diagnostics"),
@@ -125,7 +125,7 @@ class SingBoxMenuLayoutTest(unittest.TestCase):
         self.assertIn("    while :; do\n", submenu)
         self.assertNotIn("run_submenu", submenu)
         self.assertNotIn("show_menu", submenu)
-        self.assertIn('IFS= read -r submenu_choice || return 2', submenu)
+        self.assertIn("sb_read_line submenu_choice '请选择：' || return 2", submenu)
         self.assertIn("wait_key || return 2", submenu)
         self.assertNotRegex(MENU, r"(?:menu option|Choose|选项|菜单)\s+[1-9]\d*")
 

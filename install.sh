@@ -203,7 +203,7 @@ deploy_scripts_only() {
         die "Existing configuration or configuration sources not found: $CONFIG"
     [ -f "$init_path" ] || die "Existing procd service not found: $init_path"
     check_service_conflicts "$init_path"
-    for file in scripts/sbctl scripts/runtime-paths.sh scripts/download.sh scripts/configure-download.sh scripts/config-parts-lib.sh scripts/config-parts.sh scripts/route-manager.sh scripts/gateway.sh scripts/dns-guard.sh menu.sh uninstall.sh openwrt/sing-box.init config/config.template.json examples/xboard.sample.json examples/local.sample.json; do
+    for file in scripts/sbctl scripts/runtime-paths.sh scripts/terminal-input.sh scripts/download.sh scripts/configure-download.sh scripts/config-parts-lib.sh scripts/config-parts.sh scripts/route-manager.sh scripts/gateway.sh scripts/dns-guard.sh menu.sh uninstall.sh openwrt/sing-box.init config/config.template.json examples/xboard.sample.json examples/local.sample.json; do
         [ -f "$REPO_ROOT/$file" ] || die "Incomplete source: missing $file"
     done
     [ ! "$CONFIG" -ef "$INSTALL_DIR/config/config.template.json" ] ||
@@ -366,7 +366,7 @@ ok "Required installer dependencies available"
 # -----------------------------------------------------------------------------
 info "Setting up directory structure at $INSTALL_DIR..."
 validate_provider_samples "$REPO_ROOT/examples"
-for file in config-parts-lib.sh config-parts.sh route-manager.sh; do
+for file in config-parts-lib.sh config-parts.sh route-manager.sh terminal-input.sh; do
     [ -f "$REPO_ROOT/scripts/$file" ] || die "Incomplete source: missing scripts/$file"
 done
 mkdir -p "$INSTALL_DIR"/{bin,config,scripts,systemd,openwrt,board,geo,providers,runtime}
