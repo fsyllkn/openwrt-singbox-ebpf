@@ -132,7 +132,7 @@ load_service_paths() {
 }
 check_cgroup2() { printf 'cgroup\n' >> "$EVENTS"; return "${MOCK_CGROUP_STATUS:-0}"; }
 procd_open_instance() { printf 'procd-open\n' >> "$EVENTS"; }
-procd_set_param() { :; }
+procd_set_param() { if [ "$1" = limits ]; then printf "%s\n" "$2" > "$TEST_DIR/limits"; fi; }
 procd_close_instance() { :; }
 : > "$EVENTS"
 if MOCK_CGROUP_STATUS=1 start_service > "$TEST_DIR/cgroup-failure.log" 2>&1; then
@@ -142,6 +142,7 @@ printf 'sbctl:preflight\ncgroup\n' > "$TEST_DIR/expected"
 cmp "$TEST_DIR/expected" "$EVENTS" || fail 'network setup or core launch occurred before capability check'
 : > "$EVENTS"
 MOCK_AUTO_DNS=0 start_service > "$TEST_DIR/no-dns.log"
+grep -Fx 'nofile=65535 65535' "$TEST_DIR/limits" >/dev/null || fail 'procd did not receive a valid FD soft/hard limit'
 printf 'sbctl:preflight\ncgroup\ngateway:apply\nprocd-open\n' > "$TEST_DIR/expected"
 cmp "$TEST_DIR/expected" "$EVENTS" || fail 'auto_dns=0 did not skip DNS setup'
 
