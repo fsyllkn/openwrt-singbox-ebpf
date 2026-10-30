@@ -4,7 +4,7 @@
 /geo/
 /runtime/
 
-# Only the empty provider template and its instructions are public source.
+# Canonical samples live in examples; runtime providers/cache stay private.
 /providers/*
 !/providers/provider.template.json
 !/providers/README.md

@@ -4,7 +4,7 @@
 
 **公开仓库：** [fsyllkn/openwrt-singbox-ebpf](https://github.com/fsyllkn/openwrt-singbox-ebpf)，默认分支 `main`。在线安装、源码更新均使用本仓库，无需 GitHub Token，也不要求安装 Git。
 
-本仓库只包含通用配置和虚构示例。**没有可用订阅、真实代理节点或内置账号。** 首次安装后先填写自己的上游，再验证并启动；安装器不会覆盖设备已有的运行配置。
+本仓库包含通用配置和完整的本地 Provider 样例。**新装可以先启动服务、查看面板和示例节点，再逐项填写自己的上游。** 样例没有真实订阅、可用代理节点或内置账号；服务运行中不代表已经具备代理上网能力。安装器不会覆盖设备已有的运行配置。
 
 ## 1. 支持范围
 
@@ -124,29 +124,53 @@ UCI 项为 `sing-box.download.mode`、`sing-box.download.http_proxy`、`sing-box
 
 ## 4. 第一次配置与启动
 
-1. 菜单 **1** 安装/修复核心服务。
-2. 菜单 **9** 编辑实际运行配置，填写自己的上游出站或 Provider。
-3. 需要 LAN 显式代理时，菜单 **16** 设置本机实际 LAN IPv4、端口和账号。
-4. 需要 LAN 透明网关时，菜单 **13** 选择接口与客户端源网段。
-5. 使用 X-Tunnel 时，先运行其核心，再用菜单 **21** 合并实际专用 UID 排除。
-6. 运行预检，通过后启动。
+### 先确认服务与面板可以启动
+
+菜单 **1** 安装/修复核心服务。没有现有运行配置时，安装器会同时准备完整 JSON 和两份非空的本地 Provider，不需要先填写订阅 URL。安装仍不自动启动服务；在固件支持相应 eBPF 能力、安装资源齐全后，可以执行：
 
 ```sh
 sbctl config
-sbctl preflight
-sbctl start
+sbctl preflight && sbctl start
 sbctl status
 ```
 
-`config/config.json` 与 `config/config.template.json` 是相同的公开起始配置：
+Clash API 默认只监听本机 `127.0.0.1:9090`。在电脑上用实际 OpenWrt 地址建立 SSH 转发，然后访问 `http://127.0.0.1:19090/ui/`：
 
-- `providers` 为空，不会请求假订阅。
+```sh
+ssh -L 19090:127.0.0.1:9090 root@OPENWRT_IP
+```
+
+面板中能看到 `xboard/SAMPLE-XBOARD-REPLACE-ME`、`local/SAMPLE-LOCAL-REPLACE-ME` 等节点。它们只用于确认 Provider 和 selector 已加载，未提供真实代理；默认关闭示例节点的自动健康检查。保持客户端原有网关/DNS，填写真实节点并验证后再接入 LAN 客户端。
+
+### 样例文件与本地引用
+
+| 仓库中的公开样例 | 新建配置时生成的运行文件 | 用途 |
+| --- | --- | --- |
+| `examples/xboard.sample.json` | `<运行目录>/providers/xboard.json` | 示例订阅节点文件，默认以 local Provider 加载 |
+| `examples/local.sample.json` | `<运行目录>/providers/local.json` | 手工节点或 X-Tunnel 导出文件的本地引用示例 |
+| `examples/http-provider.sample.json` | 不自动启用 | 填写真实 URL 后，将同名 `xboard` Provider 切换成 remote |
+
+配置中的 `providers/xboard.json`、`providers/local.json` 是相对于 **sing-box 运行目录** 的路径，默认在 `/opt/sing-box` 下；它们不相对于 JSON 所在的 `config/` 目录。安装后的 `.sample.json` 也会保留，便于查阅格式。`provider.template.json` 提供同样可被核心解析的非空本地节点样例。
+
+`config/config.json` 与 `config/config.template.json` 是相同的公开起始配置，包含：
+
+- 两个 `type: "local"` Provider，引用安装器准备好的本地文件，不请求虚拟订阅地址。
 - `configure-your-proxy` 是待配置的 `127.0.0.1:1080` SOCKS 出站，请替换成实际节点，或确认该地址已经有可信 SOCKS 服务。
-- `proxy` 指向待配置出站，`ai` 初始跟随 `proxy`；两者没有隐式 `direct` 兜底。
+- `proxy` 同时列出本地 Provider 的节点，并保留静态 `configure-your-proxy` 默认项；`ai` 初始跟随 `proxy`，没有隐式 `direct` 兜底。
 - mixed 和 Clash API 初始仅监听回环地址；LAN 入口通过菜单按实际设备设置。
 - 新模板不预置设备专属 UID。
 
-这些示例不是现成代理服务。填写节点后再启动，并在实际客户端上验证。安装或更新不会把公开起始配置覆盖到已有运行 JSON。
+### 再填写真实节点或订阅
+
+手工节点/X-Tunnel：编辑运行目录中的 `providers/local.json`，或把 `local` Provider 的 `path` 改成实际导出路径。文件需至少包含一个核心支持的代理节点。保存后，在面板的 `proxy` 组选择真实的 `local/<节点标签>`。
+
+HTTP 订阅：参考 [HTTP 片段](examples/http-provider.sample.json)，将 `example.invalid` URL 换成自己的真实地址，再替换实际配置里同名的 `xboard` local Provider，保留另一个 `local` Provider。这个片段不是完整配置，不能直接作为 `sbctl import-config` 的输入。默认示例使用 `User-Agent: clash.meta`，省略 `http_client.detour`，通过核心默认拨号器下载；如果订阅必须经过代理，再把 `detour` 设为已配置且可用的代理出站标签。不要指向尚未配置的占位节点，也不要将它设为没有拨号选项的 `direct` 出站。
+
+切换成 remote 后，现有的新鲜 `xboard.json` 缓存可能暂时仍显示示例节点；在面板 Provider 页面手动更新 `xboard`，待真实节点出现后再选择。`path` 是可被订阅刷新覆盖的缓存，自己的手工节点应放在独立的 `local.json` 中。不要为了开启订阅而同时保留两个同名 Provider。
+
+固定核心启动时先建立 selector 静态成员，再加载 Provider。保留静态默认项，在面板选择动态 Provider 节点并由缓存保存；不要把 `xboard/<节点标签>` 直接填入初始 `outbounds` 或 `default`，以免产生启动期找不到节点的错误。字段与合并方法见 [Provider 说明](providers/README.md)。
+
+配置真实上游后，菜单 **16** 设置需要的 LAN 显式入口，菜单 **13** 设置需要的 LAN 透明网关；使用 X-Tunnel 时先启动其核心，再用菜单 **21** 对齐实际专用 UID 排除。最后预检、重启并在客户端验证。安装或更新不会把公开起始配置覆盖到已有运行 JSON，也不会用样例替换已有节点或订阅缓存。
 
 ## 5. 保留 LAN 入站与远端内网访问
 
@@ -195,7 +219,7 @@ sbctl restart
 
 导入先内核校验、备份，再替换；不自动重启。预检每次核对实际 IPv4 监听地址及上游 UID，不把语法缓存当成端口绑定成功。配置编辑工具保留配置符号链接。
 
-个人订阅、节点密码和下载后的 Provider 只存放在设备的运行目录。仓库的 `providers` 仅保留空模板和说明，其他缓存被 Git 忽略；不要把个人配置覆盖到公开仓库的起始配置后提交。
+个人订阅、节点密码和下载后的 Provider 只存放在设备的运行目录。仓库将虚拟 `.sample.json` 放在 `examples/`，`providers/` 仅跟踪通用模板和说明；真实 `xboard.json`、`local.json` 及其他缓存被 Git 忽略。更新只补缺失的样例，不替换已有 Provider；只有新建运行 JSON 时才初始化缺失的运行 Provider 文件。不要把私人数据写回公开 `.sample.json` 或起始配置后提交，Git 忽略规则不会保护已经跟踪的文件。
 
 ## 7. 在线更新
 
@@ -258,6 +282,8 @@ logread -e sing-box
 ## 9. 验证与发布内容
 
 GitHub Actions 覆盖 shell 语法、菜单、运行路径、配置保留、UID、网关、核心更新回滚、安装卸载、下载代理及独立引导流程；在 CI Linux 上解析并加载/移除实际生成的 nft 规则。公开配置还有结构化脱敏检查。
+
+除了对完整 JSON 执行真实核心 `check`，CI 还在只有 loopback 的独立 network namespace 内真正启动核心：验证本地样例加载、selector 节点选择、HTTP 片段从本地模拟订阅获取节点及缓存重启。该测试保留公开配置的 Provider/selector 结构，移除了与其无关的 eBPF、远程规则集和 WebUI 下载，不向虚拟订阅地址发请求。
 
 下载代理和服务边界测试使用隔离的模拟工具，不修改测试主机的真实路由。CI 的 nft 验证和核心配置校验不等同于对某台 OpenWrt 的 BPF、客户端 DNS、IPv6或端到端转发验收。
 

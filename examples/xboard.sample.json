@@ -1,0 +1,11 @@
+{
+  "outbounds": [
+    {
+      "type": "socks",
+      "tag": "SAMPLE-XBOARD-REPLACE-ME",
+      "server": "127.0.0.1",
+      "server_port": 9,
+      "version": "5"
+    }
+  ]
+}

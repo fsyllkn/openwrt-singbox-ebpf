@@ -37,7 +37,11 @@ with tempfile.TemporaryDirectory(prefix='sb-public-bootstrap-') as directory:
     (archive_source / 'config/config.template.json').write_text('{"public_template":true}\n')
     (archive_source / 'config/config.json').write_text('{"must_not_replace_device":true}\n')
     (archive_source / 'providers/provider.template.json').write_text('{"outbounds":[]}\n')
+    for name in ('xboard.sample.json', 'local.sample.json'):
+        shutil.copyfile(base / 'examples' / name, archive_source / 'examples' / name)
     (archive_source / 'providers/downloaded.json').write_text('{"must_not_copy":true}\n')
+    (archive_source / 'providers/xboard.json').write_text('{"real_runtime_cache":"must_not_copy"}\n')
+    (archive_source / 'providers/local.json').write_text('{"real_local_nodes":"must_not_copy"}\n')
     (archive_source / 'examples/README.md').write_text('Public example instructions\n')
     archive = root / 'public-main.tar.gz'
     with tarfile.open(archive, 'w:gz') as bundle:
@@ -94,6 +98,10 @@ pathlib.Path(output).write_bytes(pathlib.Path(os.environ['BOOT_ARCHIVE']).read_b
         assert (target / 'scripts/download.sh').is_file(), 'Shared downloader was not deployed'
         assert not (target / 'config/config.json').exists(), 'Bootstrap copied the source config over a device config location'
         assert not (target / 'providers/downloaded.json').exists(), 'Bootstrap copied a provider cache'
+        for provider in ('xboard', 'local'):
+            assert not (target / 'providers' / (provider + '.json')).exists(), 'Bootstrap copied runtime provider data'
+            assert (target / 'examples' / (provider + '.sample.json')).read_bytes() == (archive_source / 'examples' / (provider + '.sample.json')).read_bytes(), 'Public provider sample missing from source'
+            assert not (target / 'providers' / (provider + '.sample.json')).exists(), 'Bootstrap mixed source samples with installed provider files'
         assert (target / 'examples/README.md').is_file(), 'Generic feature examples were lost'
         assert str(target / 'menu.sh') in launcher.read_text(), 'Launcher points outside selected source'
         print('PASS standalone ' + name + ' download mode')
@@ -101,11 +109,18 @@ pathlib.Path(output).write_bytes(pathlib.Path(os.environ['BOOT_ARCHIVE']).read_b
     target = root / 'installed source github'
     (target / 'config/config.json').write_text('{"device_config":"keep"}\n')
     (target / 'providers/local.json').write_text('{"device_provider":"keep"}\n')
+    (target / 'providers/xboard.json').symlink_to(root / 'missing-runtime-provider')
+    (target / 'examples/xboard.sample.json').write_text('{"edited_sample":"keep"}\n')
+    (target / 'examples/local.sample.json').unlink()
+    (target / 'examples/local.sample.json').symlink_to(root / 'missing-source-sample')
     current = dict(env, SB_INSTALL_SOURCE_DIR=str(target), SB_DOWNLOAD_MODE='github', SB_GITHUB_PROXY='https://accelerator.example.invalid/')
     result = subprocess.run(['sh', str(bootstrap), '--update', '--no-menu'], env=current, capture_output=True, text=True)
     assert result.returncode == 0, 'Online archive update failed'
     assert (target / 'config/config.json').read_text() == '{"device_config":"keep"}\n'
     assert (target / 'providers/local.json').read_text() == '{"device_provider":"keep"}\n'
+    assert (target / 'providers/xboard.json').is_symlink() and not (target / 'providers/xboard.json').exists(), 'Source update replaced a dangling runtime provider'
+    assert (target / 'examples/xboard.sample.json').read_text() == '{"edited_sample":"keep"}\n', 'Source update replaced edited sample'
+    assert (target / 'examples/local.sample.json').is_symlink() and not (target / 'examples/local.sample.json').exists(), 'Source update replaced dangling sample'
     before = (target / 'README.md').read_bytes()
     result = subprocess.run(['sh', str(bootstrap), '--update', '--no-menu'], env=dict(current, BOOT_FAIL='1'), capture_output=True, text=True)
     assert result.returncode != 0, 'Failed download was accepted'
@@ -117,6 +132,40 @@ pathlib.Path(output).write_bytes(pathlib.Path(os.environ['BOOT_ARCHIVE']).read_b
     result = subprocess.run(['sh', str(bootstrap), '--archive', str(archive), '--no-menu'], env=dict(env, SB_INSTALL_SOURCE_DIR=str(offline), SB_DOWNLOAD_MODE='invalid-saved-settings'), capture_output=True, text=True)
     assert result.returncode == 0, 'Offline bootstrap unexpectedly depended on download settings'
     assert not (root / 'download-log').exists(), 'Offline bootstrap invoked a downloader'
+    incomplete_source = root / 'incomplete-source'
+    shutil.copytree(archive_source, incomplete_source)
+    (incomplete_source / 'examples/local.sample.json').unlink()
+    incomplete_target = root / 'incomplete-target'
+    result = subprocess.run(['sh', str(bootstrap), '--source', str(incomplete_source), '--no-menu'], env=dict(env, SB_INSTALL_SOURCE_DIR=str(incomplete_target)), capture_output=True, text=True)
+    assert result.returncode != 0 and not incomplete_target.exists(), 'Source missing a required sample was deployed'
+
+    # Reproduce the previous published bootstrap's whitelist: it copied all
+    # examples/*.json but only the provider template/README. A one-step update
+    # performed by that version must still yield a complete current source.
+    legacy = root / 'source-from-previous-whitelist'
+    for name in ('scripts', 'openwrt', 'config', 'providers', 'examples'):
+        (legacy / name).mkdir(parents=True)
+    for name in ('README.md', 'quick-install.sh', 'install.sh', 'menu.sh', 'uninstall.sh'):
+        shutil.copyfile(archive_source / name, legacy / name)
+    for directory_name in ('scripts', 'openwrt'):
+        for file in (archive_source / directory_name).iterdir():
+            if file.is_file():
+                shutil.copyfile(file, legacy / directory_name / file.name)
+    shutil.copyfile(archive_source / 'config/config.template.json', legacy / 'config/config.template.json')
+    for name in ('provider.template.json', 'README.md'):
+        if (archive_source / 'providers' / name).is_file():
+            shutil.copyfile(archive_source / 'providers' / name, legacy / 'providers' / name)
+    for file in (archive_source / 'examples').iterdir():
+        if file.is_file() and (file.suffix == '.json' or file.name == 'README.md'):
+            shutil.copyfile(file, legacy / 'examples' / file.name)
+    result = subprocess.run(['sh', str(bootstrap), '--source', str(legacy), '--no-menu'], env=dict(env, SB_INSTALL_SOURCE_DIR=str(legacy), SB_DOWNLOAD_MODE='invalid-offline-settings'), capture_output=True, text=True)
+    assert result.returncode == 0, f'Previous bootstrap whitelist produced incomplete current source: {result.stderr}'
+    assert not (root / 'download-log').exists(), 'Legacy source required an unexpected online repair'
+    for provider in ('xboard', 'local'):
+        assert (legacy / 'examples' / (provider + '.sample.json')).is_file(), 'Previous whitelist lost required sample'
+        assert not (legacy / 'providers' / (provider + '.json')).exists(), 'Previous whitelist imported a runtime provider'
+    print('PASS compatibility with the previous published bootstrap whitelist')
+
     for flags in (['--http-proxy', 'http://bad.invalid:8080\nnew-line'], ['--direct', '--github-proxy', 'https://accelerator.example.invalid/']):
         bad_target = root / 'rejected-target'
         result = subprocess.run(['sh', str(bootstrap), '--no-menu', *flags], env=dict(env, SB_INSTALL_SOURCE_DIR=str(bad_target)), capture_output=True, text=True)

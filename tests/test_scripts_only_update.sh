@@ -9,7 +9,7 @@ mkdir -p "$TEST_DIR/bin"
 # Extract only the production deployment functions. The private init-path
 # argument points to the fixture; the public CLI still requires OpenWrt.
 awk '
-  /^(deploy_scripts_only|record_source_directory|check_service_conflicts)\(\) \{/ { emit = 1 }
+  /^(deploy_scripts_only|record_source_directory|check_service_conflicts|validate_provider_samples|copy_missing_file|deploy_provider_samples)\(\) \{/ { emit = 1 }
   emit { print }
   emit && /^}$/ { emit = 0 }
 ' "$BASE/install.sh" > "$TEST_DIR/deploy-function.sh"
@@ -62,7 +62,7 @@ prepare_case() {
     CASE_CONFIG=$CASE_DIR/custom\ config/live.json
     MUTATION_LOG=$CASE_DIR/forbidden.log
     export CASE_HOME CASE_SOURCE CASE_INIT CASE_CONFIG MUTATION_LOG
-    mkdir -p "$CASE_SOURCE/openwrt" "$CASE_SOURCE/config" "$CASE_SOURCE/providers" \
+    mkdir -p "$CASE_SOURCE/openwrt" "$CASE_SOURCE/config" "$CASE_SOURCE/providers" "$CASE_SOURCE/examples" \
         "$CASE_HOME/scripts" "$CASE_HOME/bin" "$CASE_HOME/runtime" \
         "$CASE_HOME/config" "$CASE_HOME/providers" "$CASE_DIR/init" \
         "$(dirname "$CASE_CONFIG")" "$CASE_DIR/before"
@@ -70,8 +70,11 @@ prepare_case() {
     cp "$BASE/menu.sh" "$BASE/uninstall.sh" "$CASE_SOURCE/"
     cp "$BASE/openwrt/sing-box.init" "$CASE_SOURCE/openwrt/"
     cp "$BASE/config/config.template.json" "$CASE_SOURCE/config/config.template.json"
+    for name in xboard local; do cp "$BASE/examples/$name.sample.json" "$CASE_SOURCE/examples/"; done
     printf '{"test":"source production config must never be imported"}\n' > "$CASE_SOURCE/config/config.json"
     printf '{"test":"source provider must never be imported"}\n' > "$CASE_SOURCE/providers/private.json"
+    printf '{"test":"source runtime xboard must never be imported"}\n' > "$CASE_SOURCE/providers/xboard.json"
+    printf '{"test":"source runtime local must never be imported"}\n' > "$CASE_SOURCE/providers/local.json"
     for file in "$CASE_SOURCE"/scripts/*; do
         [ -f "$file" ] || continue
         printf '#!/bin/sh\n# old installed %s\n' "$(basename "$file")" > "$CASE_HOME/scripts/$(basename "$file")"
@@ -89,6 +92,7 @@ prepare_case() {
     chmod 0644 "$CASE_HOME/config/config.template.json"
     printf '{"test":"UCI selected external config stays untouched"}\n' > "$CASE_CONFIG"
     printf '{"test":"installed private provider"}\n' > "$CASE_HOME/providers/private.json"
+    printf '{"test":"installed xboard provider stays untouched"}\n' > "$CASE_HOME/providers/xboard.json"
     printf '{"interface":"br-lan","source_cidr":"10.23.40.0/23"}\n' > "$CASE_HOME/runtime/gateway.json"
     printf 'active gateway marker\n' > "$CASE_HOME/runtime/gateway-active"
     printf 'owned forwarding marker\n' > "$CASE_HOME/runtime/gateway-forward-owned"
@@ -122,10 +126,15 @@ for file in "$CASE_HOME/scripts/menu.sh" "$CASE_HOME/uninstall.sh" \
     "$CASE_HOME/openwrt/sing-box.init" "$CASE_INIT"; do
     [ "$(stat -c '%a' "$file")" = 755 ] || fail "wrong executable mode: $file"
 done
-for file in bin/sing-box config/config.json providers/private.json runtime/gateway.json \
+for file in bin/sing-box config/config.json providers/private.json providers/xboard.json runtime/gateway.json \
     runtime/gateway-active runtime/gateway-forward-owned scripts/local-helper.sh; do
     cmp "$CASE_DIR/before/installed/$file" "$CASE_HOME/$file" || fail "preserved file changed: $file"
 done
+for name in xboard local; do
+    cmp "$CASE_SOURCE/examples/$name.sample.json" "$CASE_HOME/providers/$name.sample.json" || fail 'scripts-only did not deploy public sample'
+    [ "$(stat -c '%a' "$CASE_HOME/providers/$name.sample.json")" = 600 ] || fail 'sample permissions are not private'
+done
+[ ! -e "$CASE_HOME/providers/local.json" ] || fail 'scripts-only created a dummy runtime provider for an existing configuration'
 cmp "$CASE_DIR/before/external-config.json" "$CASE_CONFIG" || fail 'UCI external config changed'
 [ "$(stat -c '%a' "$CASE_CONFIG")" = 600 ] || fail 'external config permissions changed'
 [ ! -f "$CASE_HOME/runtime/config.valid" ] || fail 'old validation cache not invalidated'
@@ -139,6 +148,31 @@ diff -r "$CASE_DIR/before/installed/scripts" "$backup/scripts" || fail 'old scri
 cmp "$CASE_DIR/before/sing-box.init" "$backup/sing-box.init" || fail 'old init backup differs'
 cmp "$CASE_DIR/before/installed/uninstall.sh" "$backup/uninstall.sh" || fail 'old uninstaller backup differs'
 cmp "$CASE_DIR/before/installed/config/config.template.json" "$backup/config.template.json" || fail 'old template backup differs'
+
+prepare_case preserved_samples
+printf 'edited local sample\n' > "$CASE_HOME/providers/xboard.sample.json"
+ln -s "$CASE_DIR/missing-sample-target" "$CASE_HOME/providers/local.sample.json"
+bash "$TEST_DIR/runner.sh" > "$CASE_DIR/output.log" 2>&1 || fail 'scripts-only rejected existing edited samples'
+[ "$(cat "$CASE_HOME/providers/xboard.sample.json")" = 'edited local sample' ] || fail 'scripts-only overwrote an edited sample'
+[ -L "$CASE_HOME/providers/local.sample.json" ] && [ ! -e "$CASE_HOME/providers/local.sample.json" ] || fail 'scripts-only replaced a dangling sample link'
+[ ! -e "$CASE_HOME/providers/local.json" ] || fail 'scripts-only initialized dummy runtime cache'
+cmp "$CASE_DIR/before/installed/providers/xboard.json" "$CASE_HOME/providers/xboard.json" || fail 'scripts-only changed existing runtime provider'
+[ ! -e "$MUTATION_LOG" ] || fail 'sample deployment invoked network/core/service command'
+
+for scenario in missing_sample invalid_sample; do
+    prepare_case "$scenario"
+    if [ "$scenario" = missing_sample ]; then
+        rm "$CASE_SOURCE/examples/local.sample.json"
+    else
+        printf '{"outbounds":[]}\n' > "$CASE_SOURCE/examples/local.sample.json"
+    fi
+    if bash "$TEST_DIR/runner.sh" > "$CASE_DIR/output.log" 2>&1; then fail "$scenario was deployed"; fi
+    grep -Fq 'local.sample.json' "$CASE_DIR/output.log" || fail 'missing/invalid provider sample not identified'
+    diff -r "$CASE_DIR/before/installed" "$CASE_HOME" || fail 'bad source sample changed installation before validation'
+    cmp "$CASE_DIR/before/sing-box.init" "$CASE_INIT" || fail 'bad source sample changed init'
+    cmp "$CASE_DIR/before/external-config.json" "$CASE_CONFIG" || fail 'bad source sample changed active config'
+    [ ! -e "$MUTATION_LOG" ] || fail 'bad sample invoked network/core/service command'
+done
 
 prepare_case invalid_syntax
 printf '\nif then\n' >> "$CASE_SOURCE/scripts/gateway.sh"

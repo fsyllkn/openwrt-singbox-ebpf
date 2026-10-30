@@ -387,8 +387,21 @@ validate_source() {
     [ -f "$1/scripts/dns-guard.sh" ] &&
     [ -f "$1/scripts/update-core.sh" ] &&
     [ -f "$1/openwrt/sing-box.init" ] &&
-    [ -f "$1/config/config.template.json" ]
+    [ -f "$1/config/config.template.json" ] &&
+    [ -f "$1/examples/xboard.sample.json" ] &&
+    [ -f "$1/examples/local.sample.json" ]
 }
+copy_source_sample() (
+    sample_source=$1
+    sample_target=$2
+    if [ -e "$sample_target" ] || [ -L "$sample_target" ]; then exit 0; fi
+    sample_stage=$(mktemp "${sample_target}.initial.XXXXXX") || error 'Cannot stage provider sample.'
+    trap 'rm -f "$sample_stage"' EXIT HUP INT TERM
+    cp "$sample_source" "$sample_stage" && chmod 0600 "$sample_stage" ||
+        error "Cannot prepare provider sample: $sample_source"
+    if ln -T "$sample_stage" "$sample_target" 2>/dev/null; then exit 0; fi
+    [ -e "$sample_target" ] || [ -L "$sample_target" ] || error "Cannot deploy missing provider sample: $sample_target"
+)
 download_archive() {
     dest=$1
     url=https://github.com/fsyllkn/openwrt-singbox-ebpf/archive/refs/heads/main.tar.gz
@@ -469,8 +482,10 @@ if [ "$SOURCE" != "$TARGET" ]; then
     done
     cp "$SOURCE/config/config.template.json" "$TARGET/config/config.template.json" ||
         error 'Failed copying config template.'
+    # Public samples are source assets, never downloaded/runtime provider
+    # caches. Preserve locally edited samples and all existing symlinks.
     if [ -f "$SOURCE/providers/provider.template.json" ]; then
-        cp "$SOURCE/providers/provider.template.json" "$TARGET/providers/provider.template.json"
+        copy_source_sample "$SOURCE/providers/provider.template.json" "$TARGET/providers/provider.template.json"
     fi
     if [ -f "$SOURCE/providers/README.md" ]; then
         cp "$SOURCE/providers/README.md" "$TARGET/providers/README.md"
@@ -478,7 +493,12 @@ if [ "$SOURCE" != "$TARGET" ]; then
     if [ -d "$SOURCE/examples" ]; then
         mkdir -p "$TARGET/examples"
         for file in "$SOURCE"/examples/*.json "$SOURCE/examples/README.md"; do
-            [ ! -f "$file" ] || cp "$file" "$TARGET/examples/$(basename "$file")"
+            [ -f "$file" ] || continue
+            case "$(basename "$file")" in
+                xboard.sample.json|local.sample.json)
+                    copy_source_sample "$file" "$TARGET/examples/$(basename "$file")" ;;
+                *) cp "$file" "$TARGET/examples/$(basename "$file")" ;;
+            esac
         done
     fi
 fi

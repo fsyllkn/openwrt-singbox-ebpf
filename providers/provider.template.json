@@ -1,3 +1,11 @@
 {
-  "outbounds": []
+  "outbounds": [
+    {
+      "type": "socks",
+      "tag": "SAMPLE-LOCAL-REPLACE-ME",
+      "server": "127.0.0.1",
+      "server_port": 10,
+      "version": "5"
+    }
+  ]
 }

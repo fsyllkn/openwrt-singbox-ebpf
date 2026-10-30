@@ -1,0 +1,19 @@
+{
+  "providers": [
+    {
+      "type": "remote",
+      "tag": "xboard",
+      "url": "https://example.invalid/subscription/REPLACE_WITH_YOUR_SUBSCRIPTION",
+      "path": "providers/xboard.json",
+      "http_client": {
+        "headers": {
+          "User-Agent": "clash.meta"
+        }
+      },
+      "update_interval": "24h",
+      "health_check": {
+        "enabled": false
+      }
+    }
+  ]
+}

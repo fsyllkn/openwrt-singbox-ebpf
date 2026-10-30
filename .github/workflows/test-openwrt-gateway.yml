@@ -51,6 +51,8 @@ jobs:
           cmp quick-install.sh "$archive_root/quick-install.sh"
           cmp config/config.json "$archive_root/config/config.json"
           test ! -e "$archive_root/providers/xboard.json"
+          test -f "$archive_root/examples/xboard.sample.json"
+          test -f "$archive_root/examples/local.sample.json"
           echo 'Anonymous public bootstrap and source archive match this checkout.'
           # Also verify the floating entry points used by the SSH instructions,
           # without comparing a possibly newer main with this workflow's commit.
@@ -67,6 +69,8 @@ jobs:
           sh -n "$main_root/quick-install.sh"
           test -f "$main_root/config/config.json"
           test ! -e "$main_root/providers/xboard.json"
+          test -f "$main_root/examples/xboard.sample.json"
+          test -f "$main_root/examples/local.sample.json"
           echo 'Anonymous main bootstrap and source archive are available.'
       - name: Shell syntax
         run: |
@@ -108,7 +112,7 @@ jobs:
           bash tests/test_download_integration.sh
           sh tests/test_public_bootstrap.sh
           python3 tests/test_public_sanitization.py
-      - name: Check generic configurations with the verified pinned core
+      - name: Check generic configurations and start Provider samples with the verified pinned core
         shell: bash
         run: |
           set -euo pipefail
@@ -125,6 +129,7 @@ jobs:
           core_binary=$(find "$RUNNER_TEMP/public-config-core" -type f -name sing-box -print -quit)
           test -n "$core_binary"
           sudo env SB_TEST_CORE="$core_binary" bash tests/test_generic_config_core.sh
+          sudo env SB_TEST_CORE="$core_binary" python3 tests/test_provider_startup.py
       - name: eBPF runtime diagnostic should skip missing gRPC API (mock-only)
         run: |
           if ! command -v jq >/dev/null 2>&1; then sudo apt-get update -qq && sudo apt-get install -y -qq jq; fi

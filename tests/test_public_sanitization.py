@@ -20,7 +20,10 @@ JSON_FILES = (
     ROOT / "config" / "config.json",
     ROOT / "config" / "config.template.json",
     ROOT / "providers" / "provider.template.json",
+    ROOT / "examples" / "xboard.sample.json",
+    ROOT / "examples" / "local.sample.json",
     ROOT / "examples" / "lan-private-routing.json",
+    ROOT / "examples" / "http-provider.sample.json",
 )
 DOCUMENTATION_NETS = tuple(ipaddress.ip_network(cidr) for cidr in
                            ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24"))
@@ -63,22 +66,65 @@ class PublicSanitizationTests(unittest.TestCase):
         self.starter = self.docs["config/config.json"]
         self.example = self.docs["lan-private-routing.json"]
 
-    def test_starter_matches_template_and_has_no_automatic_subscription(self):
+    def test_starter_matches_template_and_uses_only_local_providers(self):
         self.assertTrue(
             (ROOT / "config/config.json").read_bytes() == (ROOT / "config/config.template.json").read_bytes(),
             "The public starter and installation template must be identical.",
         )
+        expected = [
+            {"type": "local", "tag": "xboard", "path": "providers/xboard.json",
+             "health_check": {"enabled": False}},
+            {"type": "local", "tag": "local", "path": "providers/local.json",
+             "health_check": {"enabled": False}},
+        ]
         for name, doc in (("starter", self.starter), ("example", self.example)):
-            self.assertTrue(doc.get("providers", []) == [], f"{name}: unexpected automatic provider subscription")
-        self.assertTrue(self.docs["provider.template.json"] == {"outbounds": []},
-                        "Provider template must contain no downloaded/private nodes.")
+            self.assertTrue(doc.get("providers", []) == expected,
+                            f"{name}: defaults must load local files without a subscription or health checks")
+
+    def test_provider_samples_are_nonempty_and_loopback_only(self):
+        for name, port in (("xboard.sample.json", 9), ("local.sample.json", 10),
+                           ("provider.template.json", 10)):
+            sample = self.docs[name]
+            nodes = sample.get("outbounds", [])
+            self.assertTrue(set(sample) == {"outbounds"} and len(nodes) > 0,
+                            f"{name}: an enabled local provider needs a nonempty node list")
+            for node in nodes:
+                self.assertTrue(node.get("type") == "socks" and
+                                isinstance(node.get("tag"), str) and node["tag"].startswith("SAMPLE-") and
+                                node.get("server") == "127.0.0.1" and node.get("server_port") == port and
+                                node.get("version") == "5" and "detour" not in node,
+                                f"{name}: samples must be explicit loopback SOCKS placeholders")
+        self.assertTrue(self.docs["provider.template.json"] == self.docs["local.sample.json"],
+                        "The generic provider template must be the same nonempty local sample.")
+
+    def test_http_subscription_is_an_isolated_placeholder_fragment(self):
+        fragment = self.docs["http-provider.sample.json"]
+        self.assertTrue(set(fragment) == {"providers"} and len(fragment["providers"]) == 1,
+                        "HTTP provider example must remain a standalone merge fragment.")
+        provider = fragment["providers"][0]
+        self.assertTrue(provider.get("type") == "remote" and provider.get("tag") == "xboard"
+                        and provider.get("path") == "providers/xboard.json"
+                        and "initial_path" not in provider,
+                        "HTTP example must replace the local xboard provider and use its runtime cache.")
+        self.assertTrue(provider.get("url") == "https://example.invalid/subscription/REPLACE_WITH_YOUR_SUBSCRIPTION",
+                        "HTTP subscription example must contain only the documented invalid placeholder URL.")
+        self.assertTrue(provider.get("http_client") == {
+                            "headers": {"User-Agent": "clash.meta"}}
+                        and "user_agent" not in provider and "download_detour" not in provider,
+                        "Subscription fetching must use the default dialer without an empty-direct detour.")
+        self.assertTrue(provider.get("health_check") == {"enabled": False}
+                        and provider.get("update_interval") == "24h",
+                        "HTTP example must keep its documented refresh and health-check settings.")
 
     def test_proxy_paths_do_not_fall_back_to_direct(self):
         outbounds = {item.get("tag"): item for item in self.starter.get("outbounds", [])}
         self.assertTrue(set(outbounds) == {"proxy", "ai", "configure-your-proxy", "direct"},
                         "Starter contains unexpected real/example nodes.")
         self.assertTrue(outbounds["proxy"].get("outbounds") == ["configure-your-proxy"],
-                        "Proxy selector must use only the explicitly pending upstream.")
+                        "Proxy selector must retain a nonempty static fail-closed choice.")
+        self.assertTrue(outbounds["proxy"].get("default") == "configure-your-proxy"
+                        and outbounds["proxy"].get("providers") == ["xboard", "local"],
+                        "Proxy must expose local providers while keeping an explicit static default.")
         self.assertTrue(outbounds["ai"].get("outbounds") == ["proxy"],
                         "AI selector must keep the proxy dependency.")
         self.assertTrue(outbounds["configure-your-proxy"].get("type") == "socks"
@@ -87,12 +133,15 @@ class PublicSanitizationTests(unittest.TestCase):
                         "Starter upstream must be an obvious configurable local SOCKS placeholder.")
         self.assertTrue(self.starter.get("route", {}).get("final") == "proxy",
                         "Default proxy traffic must not silently fall back to direct.")
-        for doc in (self.starter, self.example):
+        for doc in self.docs.values():
             for outbound in doc.get("outbounds", []):
                 if outbound.get("tag") in {"proxy", "ai"}:
-                    self.assertTrue("direct" not in outbound.get("outbounds", [])
-                                    and outbound.get("default") != "direct",
+                    self.assertTrue(not {"direct", "Compatible"}.intersection(outbound.get("outbounds", []))
+                                    and outbound.get("default") not in {"direct", "Compatible"},
                                     "Proxy/AI selectors must not contain a direct fallback.")
+                    self.assertTrue(bool(outbound.get("outbounds"))
+                                    and outbound.get("default") in outbound["outbounds"],
+                                    "A provider-backed selector must retain a static default before providers load.")
                 if "server" in outbound:
                     self.assertTrue(placeholder_host(outbound["server"]),
                                     "An outbound contains a non-documentation endpoint.")
@@ -114,7 +163,10 @@ class PublicSanitizationTests(unittest.TestCase):
                     parsed = urlsplit(value)
                     self.assertTrue(parsed.username is None and parsed.password is None and not parsed.query,
                                     f"Credential/query-bearing URL in {path.relative_to(ROOT)}")
-                    self.assertTrue(parsed.hostname in {"github.com", "raw.githubusercontent.com", "sing-box.sagernet.org"},
+                    allowed_hosts = {"github.com", "raw.githubusercontent.com", "sing-box.sagernet.org"}
+                    if path.name == "http-provider.sample.json" and location == ("providers", "0", "url"):
+                        allowed_hosts = {"example.invalid"}
+                    self.assertTrue(parsed.hostname in allowed_hosts,
                                     f"Unexpected download/schema URL in {path.relative_to(ROOT)}")
 
     def test_fresh_install_does_not_trust_a_personal_lan_or_uid(self):

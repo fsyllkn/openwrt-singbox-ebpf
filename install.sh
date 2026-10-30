@@ -42,18 +42,82 @@ record_source_directory() {
         { rm -f "$source_record"; die "Cannot record source directory"; }
 }
 
+validate_provider_samples() {
+    local directory="$1" name sample
+    for name in xboard local; do
+        sample="$directory/$name.sample.json"
+        [ -f "$sample" ] && [ -r "$sample" ] || die "Missing or unreadable provider sample: $sample"
+        jq -e '
+          type == "object" and
+          (.outbounds | type == "array" and length > 0 and
+            all(.[]; type == "object" and
+              (.type | type == "string" and length > 0) and
+              (.tag | type == "string" and length > 0)))
+        ' "$sample" >/dev/null 2>&1 || die "Invalid provider sample: $sample (expected a non-empty outbounds array with type and tag)"
+    done
+}
+
+# Publish a complete private file without replacing any existing directory
+# entry, including a dangling symlink. The staging file is on the same volume.
+copy_missing_file() {
+    local source="$1" destination="$2" temporary
+    if [ -e "$destination" ] || [ -L "$destination" ]; then return 0; fi
+    mkdir -p "$(dirname "$destination")" || return 1
+    temporary="$(mktemp "${destination}.initial.XXXXXX")" || return 1
+    if ! cp "$source" "$temporary" || ! chmod 0600 "$temporary"; then
+        rm -f "$temporary"
+        return 1
+    fi
+    if ln -T "$temporary" "$destination" 2>/dev/null; then
+        rm -f "$temporary"
+        return 0
+    fi
+    rm -f "$temporary"
+    # Another installer may have supplied this path after the initial check.
+    [ -e "$destination" ] || [ -L "$destination" ]
+}
+
+deploy_provider_samples() {
+    local name
+    validate_provider_samples "$REPO_ROOT/examples"
+    for name in xboard local; do
+        copy_missing_file "$REPO_ROOT/examples/$name.sample.json" "$INSTALL_DIR/providers/$name.sample.json" ||
+            die "Cannot deploy missing provider sample: $INSTALL_DIR/providers/$name.sample.json"
+    done
+}
+
 create_default_config() {
     # Render machine-dependent paths only for a fresh installation. Existing
     # user inbounds, private-IP routes, providers and credentials stay intact.
-    [ ! -f "$CONFIG" ] || return 0
-    local candidate
+    if [ -e "$CONFIG" ] || [ -L "$CONFIG" ]; then
+        [ -f "$CONFIG" ] && [ -r "$CONFIG" ] || die "Existing configuration is not a readable file; refusing to replace it: $CONFIG"
+        return 0
+    fi
+    local candidate name provider
+    validate_provider_samples "$INSTALL_DIR/providers"
+    for name in xboard local; do
+        provider="$INSTALL_DIR/providers/$name.json"
+        if [ -e "$provider" ] || [ -L "$provider" ]; then
+            [ -f "$provider" ] && [ -r "$provider" ] ||
+                die "Existing provider is not a readable file; refusing to replace it: $provider"
+        fi
+    done
     mkdir -p "$(dirname "$CONFIG")"
     candidate="$(mktemp "${CONFIG}.initial.XXXXXX")" || die "Cannot stage initial configuration"
-    jq --arg ui_root "$INSTALL_DIR/board/dist" \
+    if ! jq --arg ui_root "$INSTALL_DIR/board/dist" \
         '.experimental.clash_api.external_ui = $ui_root' \
-        "$INSTALL_DIR/config/config.template.json" > "$candidate" &&
-        chmod 0600 "$candidate" && mv -f "$candidate" "$CONFIG" ||
-        { rm -f "$candidate"; die "Cannot render initial configuration"; }
+        "$INSTALL_DIR/config/config.template.json" > "$candidate"; then
+        rm -f "$candidate"
+        die "Cannot render initial configuration"
+    fi
+    for name in xboard local; do
+        copy_missing_file "$INSTALL_DIR/providers/$name.sample.json" "$INSTALL_DIR/providers/$name.json" ||
+            { rm -f "$candidate"; die "Cannot initialize missing provider: $INSTALL_DIR/providers/$name.json"; }
+    done
+    copy_missing_file "$candidate" "$CONFIG" || { rm -f "$candidate"; die "Cannot create initial configuration"; }
+    rm -f "$candidate"
+    info "Local example providers are ready; start the service to inspect its status and dashboard."
+    info "Example nodes do not provide a working proxy; configure and select real nodes before use."
 }
 
 check_service_conflicts() {
@@ -79,7 +143,7 @@ deploy_scripts_only() {
     [ -f "$CONFIG" ] || die "Existing configuration not found: $CONFIG"
     [ -f "$init_path" ] || die "Existing procd service not found: $init_path"
     check_service_conflicts "$init_path"
-    for file in scripts/sbctl scripts/runtime-paths.sh scripts/download.sh scripts/configure-download.sh scripts/gateway.sh scripts/dns-guard.sh menu.sh uninstall.sh openwrt/sing-box.init config/config.template.json; do
+    for file in scripts/sbctl scripts/runtime-paths.sh scripts/download.sh scripts/configure-download.sh scripts/gateway.sh scripts/dns-guard.sh menu.sh uninstall.sh openwrt/sing-box.init config/config.template.json examples/xboard.sample.json examples/local.sample.json; do
         [ -f "$REPO_ROOT/$file" ] || die "Incomplete source: missing $file"
     done
     [ ! "$CONFIG" -ef "$INSTALL_DIR/config/config.template.json" ] ||
@@ -92,6 +156,7 @@ deploy_scripts_only() {
     sh -n "$REPO_ROOT/openwrt/sing-box.init" || die "Init syntax failed"
     bash -n "$REPO_ROOT/uninstall.sh" || die "Uninstaller syntax failed"
     jq -e 'type == "object"' "$REPO_ROOT/config/config.template.json" >/dev/null || die "Configuration template is not valid JSON"
+    validate_provider_samples "$REPO_ROOT/examples"
     backup="$INSTALL_DIR/runtime/scripts-backup.$(date +%Y%m%d-%H%M%S).$$"
     mkdir -p "$backup" "$INSTALL_DIR/scripts" "$INSTALL_DIR/openwrt" "$INSTALL_DIR/config"
     chmod 0700 "$backup"
@@ -113,6 +178,7 @@ deploy_scripts_only() {
         cp "$file" "$temporary" && chmod "$mode" "$temporary" && mv -f "$temporary" "$dest" ||
             { rm -f "$temporary"; die "Cannot deploy $dest; backup: $backup"; }
     done
+    deploy_provider_samples
     temporary="$(mktemp "${init_path}.update.XXXXXX")" || die "Cannot stage procd service"
     cp "$INSTALL_DIR/openwrt/sing-box.init" "$temporary" &&
         chmod 0755 "$temporary" && mv -f "$temporary" "$init_path" ||
@@ -239,6 +305,7 @@ ok "Required installer dependencies available"
 # 4. Project Directory Layout
 # -----------------------------------------------------------------------------
 info "Setting up directory structure at $INSTALL_DIR..."
+validate_provider_samples "$REPO_ROOT/examples"
 mkdir -p "$INSTALL_DIR"/{bin,config,scripts,systemd,openwrt,board,geo,providers,runtime}
 mkdir -p "$(dirname "$CONFIG")"
 
@@ -247,12 +314,7 @@ cp -a "$REPO_ROOT/scripts"/* "$INSTALL_DIR/scripts/"
 cp -a "$REPO_ROOT/systemd"/* "$INSTALL_DIR/systemd/" 2>/dev/null || true
 cp -a "$REPO_ROOT/openwrt"/* "$INSTALL_DIR/openwrt/" 2>/dev/null || true
 cp -a "$REPO_ROOT/config/config.template.json" "$INSTALL_DIR/config/"
-
-# Production config in the repository may contain server-specific credentials
-# and is not appropriate as the OpenWrt router's first boot configuration.
-if [ "$OS" != "openwrt" ] && [ -f "$REPO_ROOT/config/config.json" ] && [ ! -f "$CONFIG" ]; then
-    cp -a "$REPO_ROOT/config/config.json" "$CONFIG"
-fi
+deploy_provider_samples
 
 # Local menu and uninstaller must survive removal of the source checkout.
 if [ "$OS" = "openwrt" ] && [ -f "$REPO_ROOT/menu.sh" ]; then

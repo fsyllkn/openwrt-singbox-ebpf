@@ -1,4 +1,8 @@
-# 局域网认证代理与远端私网路由示例
+# 局域网、远端私网与订阅示例
+
+本目录包含完整的 `lan-private-routing.json`、单独的 `http-provider.sample.json` 订阅片段，以及 `xboard.sample.json`、`local.sample.json` 两份本地 Provider 内容文件。完整配置使用本地 Provider，不会自动请求片段中的虚构订阅 URL。Provider 样例与运行文件的区别见 [Provider 说明](../providers/README.md)。
+
+## 局域网认证代理与远端私网路由
 
 `lan-private-routing.json` 是在公开基础配置上扩展的完整示例，保留 DNS、AI 与 WebRTC 严格策略，并演示两项独立功能：
 
@@ -14,8 +18,11 @@
 | `configure-your-proxy` | `127.0.0.1:1080` 是待配置 SOCKS 出站 | 用自己的实际代理节点替换，或确认此处已有可信 SOCKS 服务 |
 | `remote-office` | `192.0.2.20:1080` 是文档示例节点 | 能访问目标远端私网的实际出站节点 |
 | 私网目的地址 | `10.77.50.10/32`、`10.88.60.0/24` 是虚构网络 | 希望强制经过该节点的实际目的 IP/CIDR |
+| 本地 Provider | `providers/xboard.json` 与 `providers/local.json` 是相对运行目录的路径 | 确保文件存在且节点数组非空；个人节点只写设备上的运行文件 |
 
-本示例仅含占位节点和账号字段，没有可用订阅或真实节点。请先替换占位内容。基础 `proxy` 与 `ai` 选择器均没有 `direct` 兜底，待配置节点不可用时不会用直连冒充代理成功。
+本示例仅含占位节点和账号字段，没有可用订阅或真实节点。请先替换占位内容。公开的本地 Provider 样例只有 `examples/xboard.sample.json`、`examples/local.sample.json` 两份；安装后会部署到运行目录的 `providers/`，并为新安装创建缺少的 `xboard.json`、`local.json`。样例 SOCKS 节点指向回环端口 `9`、`10`，配置关闭了节点健康检查。它们让本地 Provider 有合法的非空内容，不提供代理上网服务。
+
+`proxy` 已引用 `xboard`、`local`，初始仍选择静态 `configure-your-proxy`。使用自己的 Provider 节点时，在控制面板中选择带有 `xboard/` 或 `local/` 前缀的实际节点。基础 `proxy` 与 `ai` 选择器均没有 `direct` 兜底，待配置节点不可用时不会用直连冒充代理成功。
 
 ## 路由顺序
 
@@ -37,3 +44,15 @@ sbctl restart
 导入会执行内核配置校验并备份现有配置，不自动重启；导入成功不代表监听地址已分配给本机。若仍使用文档地址，后续监听地址预检和启动会拒绝未分配的地址，避免把示例地址当成本机地址。
 
 透明 LAN 网关的接口和源网段需要单独通过 `sb` 菜单设置。修改 `mixed.listen` 不会自动改变网关源网段，也不等于已经接管 LAN 客户端的 IPv6 或 DNS。
+
+## HTTP 订阅片段
+
+`http-provider.sample.json` 仅演示顶层 `providers` 字段中的一项，不能直接交给 `sbctl import-config` 当作完整配置运行。
+
+1. 将 `https://example.invalid/subscription/REPLACE_WITH_YOUR_SUBSCRIPTION` 换成自己的实际订阅 URL。
+2. 在设备上的完整配置中，用片段的远程 Provider 替换原有 `tag: "xboard"` 的本地 Provider，保留其他 Provider。
+3. 检查 `path` 和订阅下载路径，再校验、重启，并在控制面板中选择实际节点。
+
+片段在 `http_client.headers` 中设置 `User-Agent: clash.meta`，省略 `detour`，使用核心默认拨号器直连下载订阅；它仅影响订阅请求。需要通过代理下载时，再填已配置且实际可用的出站标签，不能依赖尚未配置的占位代理，也不要填指向空 `direct` 出站的标签。
+
+`providers/xboard.json` 会作为可写的订阅缓存，更新时会被替换。无有效缓存时，错误的 URL 会导致初次订阅加载失败；24 小时更新间隔和关闭节点健康检查都不会禁用订阅下载。不要把未替换的虚构 URL 合并进要启动的配置。

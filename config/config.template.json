@@ -237,7 +237,11 @@
         "configure-your-proxy"
       ],
       "default": "configure-your-proxy",
-      "interrupt_exist_connections": true
+      "interrupt_exist_connections": true,
+      "providers": [
+        "xboard",
+        "local"
+      ]
     },
     {
       "type": "selector",
@@ -481,5 +485,22 @@
       }
     ]
   },
-  "providers": []
+  "providers": [
+    {
+      "type": "local",
+      "tag": "xboard",
+      "path": "providers/xboard.json",
+      "health_check": {
+        "enabled": false
+      }
+    },
+    {
+      "type": "local",
+      "tag": "local",
+      "path": "providers/local.json",
+      "health_check": {
+        "enabled": false
+      }
+    }
+  ]
 }
