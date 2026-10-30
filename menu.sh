@@ -1,0 +1,556 @@
+#!/bin/sh
+# Lightweight SSH menu for OpenWrt / BusyBox ash. No Python needed.
+set -u
+MENU_FILE=$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")
+MENU_DIR=$(CDPATH= cd -- "$(dirname -- "$MENU_FILE")" && pwd -P) || exit 1
+if [ -r "$MENU_DIR/runtime-paths.sh" ]; then
+    MENU_PATHS=$MENU_DIR/runtime-paths.sh
+else
+    MENU_PATHS=$MENU_DIR/scripts/runtime-paths.sh
+fi
+[ -r "$MENU_PATHS" ] || {
+    echo 'Missing runtime-paths.sh; deploy the complete updated scripts directory.' >&2
+    exit 1
+}
+. "$MENU_PATHS"
+sb_load_paths || exit 1
+SB_HOME=$SH_SINGBOX_HOME
+GATEWAY=$SB_HOME/scripts/gateway.sh
+CONFIG=$SH_SINGBOX_CONFIG
+SERVICE=/etc/init.d/sing-box
+SBCTL=$SB_HOME/scripts/sbctl
+find_source_dir() {
+    # Source records contain a plain path, never shell code. A copied installed
+    # menu must still locate the checkout selected during installation.
+    if [ -n "${SB_INSTALL_SOURCE_DIR:-}" ]; then
+        printf '%s\n' "$SB_INSTALL_SOURCE_DIR"
+        return
+    fi
+    if [ -f "$MENU_DIR/install.sh" ]; then
+        printf '%s\n' "$MENU_DIR"
+        return
+    fi
+    recorded_source=
+    if [ -r "$SB_HOME/runtime/source-dir" ]; then
+        IFS= read -r recorded_source < "$SB_HOME/runtime/source-dir" || recorded_source=
+        case "$recorded_source" in
+            /*) if [ -f "$recorded_source/install.sh" ]; then printf '%s\n' "$recorded_source"; return; fi ;;
+        esac
+    fi
+    if command -v uci >/dev/null 2>&1; then
+        recorded_source=$(uci -q get sing-box.main.source_dir 2>/dev/null) || recorded_source=
+        case "$recorded_source" in
+            /*) if [ -f "$recorded_source/install.sh" ]; then printf '%s\n' "$recorded_source"; return; fi ;;
+        esac
+    fi
+    for recorded_source in /overlay/openwrt-singbox-ebpf /root/openwrt-singbox-ebpf /overlay/linux_openwrt-sing-box /root/linux_openwrt-sing-box; do
+        if [ -f "$recorded_source/install.sh" ]; then printf '%s\n' "$recorded_source"; return; fi
+    done
+    printf '%s\n' "$MENU_DIR"
+}
+REPO_DIR=$(find_source_dir)
+[ -f /etc/openwrt_release ] || {
+    echo "This distribution requires OpenWrt/procd." >&2
+    exit 1
+}
+
+say() { printf '%s\n' "$*"; }
+ask() {
+    printf '%s [y/N]: ' "$1"
+    IFS= read -r answer || return 1
+    case "$answer" in y|Y|yes|YES) return 0;; esac
+    return 1
+}
+wait_key() { printf '\nPress Enter to continue...'; IFS= read -r unused || true; }
+root_only() { [ "$(id -u)" -eq 0 ] || { say 'Requires root.'; return 1; }; }
+load_download_library() {
+    download_library=$REPO_DIR/scripts/download.sh
+    [ -r "$download_library" ] || download_library=$SB_HOME/scripts/download.sh
+    [ -r "$download_library" ] || {
+        say 'Missing download.sh; deploy the complete project scripts.'; return 1;
+    }
+    . "$download_library"
+    sb_download_load
+}
+run_sbctl() {
+    if [ -f "$SBCTL" ]; then
+        /bin/bash "$SBCTL" "$@"
+    else
+        say 'sing-box has not been installed. Choose 1 first.'
+        return 1
+    fi
+}
+service_status() {
+    if [ ! -x "$SERVICE" ]; then
+        printf 'not installed'
+    elif "$SERVICE" status >/dev/null 2>&1; then
+        printf 'running'
+    else
+        printf 'stopped'
+    fi
+}
+gateway_status() {
+    if [ -f "$SB_HOME/runtime/gateway.json" ]; then printf 'configured'
+    else printf 'off'; fi
+}
+package_manager() {
+    if command -v opkg >/dev/null 2>&1; then printf opkg
+    elif command -v apk >/dev/null 2>&1; then printf apk
+    else printf unknown; fi
+}
+backup_config() {
+    [ -f "$CONFIG" ] || { say "Missing $CONFIG"; return 1; }
+    dest="$CONFIG.menu.$(date +%Y%m%d-%H%M%S).$$.bak"
+    cp -p "$CONFIG" "$dest" || return 1
+    chmod 0600 "$dest"
+    say "Backup: $dest"
+}
+edit_config() {
+    say "Editing service configuration: $CONFIG"
+    backup_config || return
+    vi "$CONFIG" || return
+    if command -v jq >/dev/null 2>&1; then
+        jq -e . "$CONFIG" >/dev/null 2>&1 || {
+            say 'WARNING: JSON syntax invalid. Restore the backup before starting service.'
+            return 1
+        }
+    fi
+    say 'Config saved. Run menu option 8 to validate before any restart.'
+}
+install_core() {
+    root_only || return
+    case "$(uname -m)" in
+        x86_64|amd64|aarch64|arm64) ;;
+        *) say 'This reF1nd build supports Linux amd64/arm64. No packages or services were changed.'; return 1 ;;
+    esac
+    [ -f "$REPO_DIR/install.sh" ] || {
+        say "Source not available in $REPO_DIR. Download openwrt-singbox-ebpf from its public main branch."
+        return 1
+    }
+    say 'Installation registers procd and may update packages and the core binary.'
+    say 'It does not start the transparent proxy. Existing running sing-box can be affected by a core update.'
+    ask 'Install/repair sing-box now?' || return
+    load_download_library || return
+    if ! command -v bash >/dev/null 2>&1; then
+        say 'Bash is required by the existing sing-box service scripts.'
+        if command -v opkg >/dev/null 2>&1; then
+            sb_download_run opkg update || true
+            sb_download_run opkg install bash || return
+        elif command -v apk >/dev/null 2>&1; then
+            sb_download_run apk update || true
+            sb_download_run apk add bash || return
+        else
+            say 'No supported package manager to install Bash.'
+            return 1
+        fi
+    fi
+    (cd "$REPO_DIR" && bash install.sh)
+}
+# Derive a network from the selected interface's real address/prefix. Multiple
+# addresses in one subnet are fine; multiple distinct subnets need a choice.
+# This deliberately does not use the previously saved gateway CIDR, which may
+# describe the LAN before the router was moved to another network.
+gateway_default_interface() (
+    candidate=
+    if command -v jq >/dev/null 2>&1 && [ -f "$SB_HOME/runtime/gateway.json" ]; then
+        candidate=$(jq -er '.interface | select(type == "string")' "$SB_HOME/runtime/gateway.json" 2>/dev/null) || candidate=
+    fi
+    valid_interface() {
+        case "$1" in ''|lo|*[!A-Za-z0-9_.:-]*) return 1 ;; esac
+        ip link show dev "$1" >/dev/null 2>&1
+    }
+    if valid_interface "$candidate"; then printf '%s\n' "$candidate"; exit 0; fi
+    if command -v ubus >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+        candidate=$(ubus call network.interface.lan status 2>/dev/null |
+            jq -er '.l3_device // .device // empty' 2>/dev/null) || candidate=
+        if valid_interface "$candidate"; then printf '%s\n' "$candidate"; exit 0; fi
+    fi
+    if command -v uci >/dev/null 2>&1; then
+        for option in device ifname; do
+            candidate=$(uci -q get "network.lan.$option" 2>/dev/null) || candidate=
+            if valid_interface "$candidate"; then printf '%s\n' "$candidate"; exit 0; fi
+        done
+    fi
+    # Without an explicit LAN designation, a unique usable interface is safe
+    # to suggest. Multiple LAN/WAN/VLAN interfaces require a user selection.
+    addresses=$(ip -4 -o addr show scope global 2>/dev/null) || exit 1
+    candidate=$(printf '%s\n' "$addresses" | awk '$2 != "lo" {sub(/@.*/, "", $2); names[$2]=1}
+        END {for (name in names) {count++; result=name} if (count!=1) exit 1; print result}') || exit 1
+    valid_interface "$candidate" || exit 1
+    printf '%s\n' "$candidate"
+)
+gateway_default_cidr() (
+    [ "$#" -eq 1 ] || exit 1
+    lan_addresses=$(ip -4 -o addr show dev "$1" scope global 2>/dev/null) || exit 1
+    printf '%s\n' "$lan_addresses" | awk '
+      {
+        for (i = 1; i < NF; i++) {
+          if ($i != "inet") continue
+          if (split($(i + 1), pair, "/") != 2) continue
+          if (pair[2] !~ /^[0-9]+$/ || pair[2] < 1 || pair[2] > 32) continue
+          if (split(pair[1], octet, ".") != 4) continue
+          valid = 1
+          address = 0
+          for (j = 1; j <= 4; j++) {
+            if (octet[j] !~ /^[0-9]+$/ || octet[j] > 255) valid = 0
+            address = address * 256 + octet[j]
+          }
+          if (!valid) continue
+          block = 2 ^ (32 - pair[2])
+          network = int(address / block) * block
+          cidr = sprintf("%d.%d.%d.%d/%d", int(network / 16777216),
+                 int(network / 65536) % 256, int(network / 256) % 256,
+                 network % 256, pair[2])
+          networks[cidr] = 1
+        }
+      }
+      END {
+        count = 0
+        for (cidr in networks) { count++; result = cidr }
+        if (count != 1) exit 1
+        print result
+      }
+    '
+)
+configure_gateway() {
+    root_only || return
+    [ -f "$GATEWAY" ] || { say 'Install sing-box before configuring gateway.'; return; }
+    command -v nft >/dev/null 2>&1 || { say 'nft missing. Install nftables / nft as available for this firmware.'; return; }
+    command -v ip >/dev/null 2>&1 || { say 'ip missing. Install ip-full.'; return; }
+    if ! /bin/bash "$GATEWAY" requirements; then
+        say '网关设置尚未改动。此固件需要完整 iproute2（OpenWrt 的 ip-full），BusyBox ip 不支持当前专用路由表。'
+        return
+    fi
+    say 'LAN gateway: nftables TProxy for clients on the selected interface; existing local eBPF settings are preserved.'
+    say 'Select the actual LAN interface and its on-link client CIDR.'
+    ip -4 route show default
+    ip -4 -o addr show scope global
+    default_interface=$(gateway_default_interface) || default_interface=
+    if [ -n "$default_interface" ]; then
+        printf 'LAN interface [%s]: ' "$default_interface"
+    else
+        say 'No unique LAN interface detected; choose the LAN device from the addresses above.'
+        printf 'LAN interface: '
+    fi
+    IFS= read -r interface || return
+    interface=${interface:-$default_interface}
+    [ -n "$interface" ] || { say 'No LAN interface selected; gateway configuration unchanged.'; return 1; }
+    default_cidr=$(gateway_default_cidr "$interface") || default_cidr=
+    if [ -n "$default_cidr" ]; then
+        printf 'LAN subnet CIDR [%s]: ' "$default_cidr"
+    else
+        say 'No unique IPv4 LAN subnet detected; enter the actual subnet/prefix explicitly.'
+        printf 'LAN subnet CIDR: '
+    fi
+    IFS= read -r cidr || return
+    cidr=${cidr:-$default_cidr}
+    [ -n "$cidr" ] || { say 'No subnet selected; gateway configuration unchanged.'; return 1; }
+    ask "Configure gateway for $interface / $cidr? Does not enable it until restart." || return
+    /bin/bash "$GATEWAY" configure "$interface" "$cidr" || return
+    say 'Next run option 8 (config check), then option 3 (restart) during a maintenance window.'
+}
+disable_gateway() {
+    root_only || return
+    [ -f "$GATEWAY" ] || return
+    say 'Gateway changes can interrupt client traffic.'
+    ask 'Stop sing-box and disable LAN TProxy gateway configuration?' || return
+    if [ -x "$SERVICE" ]; then "$SERVICE" stop || return; fi
+    /bin/bash "$GATEWAY" disable
+}
+inspect_xtunnel() {
+    say 'X-Tunnel provider is a local sing-box provider; only its path needs matching.'
+    [ -f "$CONFIG" ] || { say 'Install/configure sing-box first.'; return; }
+    command -v jq >/dev/null 2>&1 || { say 'Install jq to inspect JSON provider settings.'; return; }
+    jq -r '.providers[]? | select(.type == "local") | [.tag, .path] | @tsv' "$CONFIG" |
+    while IFS="$(printf '\t')" read -r provider_tag path; do
+        case "$path" in /*) ;; *) path=$SB_HOME/$path ;; esac
+        say "Local provider $provider_tag: $path"
+        if [ -f "$path" ]; then
+            jq -e '.outbounds | type == "array"' "$path" >/dev/null 2>&1 &&
+                say 'Provider structure: OK' || say 'Provider structure: INVALID'
+        else
+            say 'Provider missing. Match its configured path to the actual provider export file.'
+        fi
+    done
+    say 'Important: if X-Tunnel runs as root, eBPF exclude_uid=0 would exclude ALL root processes.'
+    say 'Review current X-Tunnel process UIDs and eBPF local.exclude_uid before enabling sing-box.'
+    for pid in $(pidof x-tunnel 2>/dev/null || true); do
+        [ -r "/proc/$pid/status" ] || continue
+        uid=$(awk '/^Uid:/ {print $2; exit}' "/proc/$pid/status")
+        say "x-tunnel PID=$pid UID=$uid"
+    done
+    jq -c '.inbounds[]? | select(.type == "ebpf") | .local.exclude_uid' "$CONFIG"
+}
+# Safety check: an X-Tunnel core captured by local eBPF may proxy its
+# own upstream connection back through itself. Never silently exclude root.
+preflight_xtunnel() {
+    # Use the same UID/range checks as direct sbctl/procd startup.
+    run_sbctl check-xtunnel
+}
+
+diagnose() {
+    say 'Network diagnostics (read-only):'
+    say "Service configuration: $CONFIG"
+    uname -r
+    grep cgroup2 /proc/mounts || say 'cgroup v2 not mounted'
+    ip -4 route show default 2>/dev/null || true
+    ip -4 rule show 2>/dev/null || true
+    if command -v nft >/dev/null 2>&1; then
+        nft list table inet singbox_one_arm 2>/dev/null || say 'LAN TProxy nftables table not active.'
+    fi
+    [ -f "$GATEWAY" ] && /bin/bash "$GATEWAY" status || true
+    [ -x "$SERVICE" ] && "$SERVICE" status || true
+}
+source_update() {
+    root_only || return
+    [ -f "$REPO_DIR/quick-install.sh" ] || {
+        say '一键脚本不存在。请从 openwrt-singbox-ebpf 公开仓库 main 分支下载 quick-install.sh。'
+        return 1
+    }
+    if [ -d "$REPO_DIR/.git" ]; then
+        command -v git >/dev/null 2>&1 || {
+            say '当前目录是 Git 仓库，但设备没有 git。为保护本地工作区，请使用电脑更新仓库后再上传。'
+            return 1
+        }
+        branch=$(git -C "$REPO_DIR" symbolic-ref --short HEAD 2>/dev/null || true)
+        case "$branch" in main|openwrt) ;; *)
+            say "当前 Git 分支为 '$branch'，拒绝自动更新。"
+            return 1
+            ;; esac
+        [ -z "$(git -C "$REPO_DIR" status --porcelain)" ] || {
+            say '存在未提交的 Git 变更，拒绝自动更新。'
+            return 1
+        }
+        load_download_library || return
+        if [ "$SB_DOWNLOAD_MODE_RESOLVED" = github ]; then
+            say 'GitHub 下载前缀用于源码压缩包；当前目录是 Git 工作树，请在菜单 24 选择 HTTP 代理或默认下载后拉取。'
+            return 1
+        fi
+        ask "从当前远程拉取 $branch 分支？不会自动重启服务。" || return
+        sb_download_run git -C "$REPO_DIR" pull --ff-only || return
+    else
+        say '在线更新使用 openwrt-singbox-ebpf 公开仓库 main 分支及当前下载代理设置。'
+        printf '离线 ZIP/TAR.GZ 路径（回车直接在线更新）: '
+        IFS= read -r archive || return
+        ask '更新本地 OpenWrt 源码？不会重启服务。' || return
+        if [ -n "$archive" ]; then
+            SB_INSTALL_SOURCE_DIR="$REPO_DIR" sh "$REPO_DIR/quick-install.sh" --update --archive "$archive" --no-menu || return
+        else
+            SB_INSTALL_SOURCE_DIR="$REPO_DIR" sh "$REPO_DIR/quick-install.sh" --update --no-menu || return
+        fi
+    fi
+    say "源码更新完成：$REPO_DIR"
+    say "仅部署脚本到 $SB_HOME：在该源码目录执行 bash install.sh --scripts-only。"
+    say '菜单 1 是完整安装流程，可能更新运行中的内核。'
+    say '仅更新源码不会重启 sing-box。'
+}
+configure_download_proxy() {
+    root_only || return
+    proxy_tool=$REPO_DIR/scripts/configure-download.sh
+    [ -f "$proxy_tool" ] || proxy_tool=$SB_HOME/scripts/configure-download.sh
+    [ -f "$proxy_tool" ] || { say 'Missing configure-download.sh; update the complete project.'; return 1; }
+    sh "$proxy_tool" show || true
+    say '1) 默认下载（继承系统环境）'
+    say '2) 使用本地/局域网 HTTP 代理'
+    say '3) 使用公开 GitHub 下载代理前缀'
+    say '0) 返回'
+    printf '选择下载方式: '
+    IFS= read -r proxy_choice || return
+    case "$proxy_choice" in
+        1) sh "$proxy_tool" set direct || return ;;
+        2|3)
+            case "$proxy_choice" in
+                2) proxy_mode=http; say '输入 HTTP 代理 URL，例如 http://127.0.0.1:7890。输入不会回显。' ;;
+                3) proxy_mode=github; say '输入可信 GitHub 下载代理前缀，例如 https://ghfast.top/。输入不会回显。' ;;
+            esac
+            if ! (
+                tty_state=
+                if [ -t 0 ]; then
+                    tty_state=$(stty -g) || exit 1
+                    trap 'stty "$tty_state"' EXIT HUP INT TERM
+                    stty -echo || exit 1
+                fi
+                printf 'URL: ' >&2
+                IFS= read -r proxy_url || exit 1
+                printf '\n' >&2
+                printf '%s\n' "$proxy_url" | sh "$proxy_tool" set "$proxy_mode" --stdin
+            ); then return 1; fi
+            ;;
+        0|'') return ;;
+        *) say 'Unknown option.'; return 1 ;;
+    esac
+    unset SB_DOWNLOAD_MODE SB_HTTP_PROXY SB_GITHUB_PROXY
+    say '下载设置已保存，本菜单后续安装/更新使用该设置；不修改 sing-box 代理流量配置。'
+    sh "$proxy_tool" show
+}
+migrate_config() {
+    root_only || return
+    script="$REPO_DIR/scripts/migrate-config.sh"
+    [ -f "$script" ] || script="$SB_HOME/scripts/migrate-config.sh"
+    [ -f "$script" ] || {
+        say '找不到迁移脚本。先通过选项 2 更新公开仓库源码。'
+        return 1
+    }
+    [ -f "$CONFIG" ] || { say '现有 sing-box 配置不存在。'; return 1; }
+    say '将移除旧版 DNS/block 出站，修复 sniff 和 DNS hijack 规则。'
+    say '先备份并使用当前内核校验；失败时不写入原配置，不重启服务。'
+    ask '现在修复现有 sing-box 配置？' || return
+    /bin/bash "$script" "$CONFIG"
+}
+configure_pc_proxy() {
+    root_only || return
+    script="$SB_HOME/scripts/configure-pc-proxy.sh"
+    [ -f "$script" ] || script="$REPO_DIR/scripts/configure-pc-proxy.sh"
+    [ -f "$script" ] || { say '未找到 LAN 代理配置脚本，请更新公开仓库并部署配套脚本。'; return 1; }
+    say '只允许将代理绑定到本机已有的 RFC1918 LAN IPv4，必须设置账号密码。'
+    say '配置更新前会执行 sing-box check，失败则不替换原配置。'
+    /bin/bash "$script" configure
+}
+disable_pc_proxy() {
+    root_only || return
+    script="$SB_HOME/scripts/configure-pc-proxy.sh"
+    [ -f "$script" ] || script="$REPO_DIR/scripts/configure-pc-proxy.sh"
+    [ -f "$script" ] || { say '未找到代理配置脚本。'; return 1; }
+    ask '关闭 PC 的 HTTP/SOCKS5 LAN 监听入口？不会立即重启服务。' || return
+    /bin/bash "$script" disable
+}
+apply_pc_privacy() {
+    root_only || return
+    script="$SB_HOME/scripts/apply-pc-privacy.sh"
+    [ -f "$script" ] || script="$REPO_DIR/scripts/apply-pc-privacy.sh"
+    [ -f "$script" ] || {
+        say '未找到严格隐私策略脚本，请先更新公开仓库源码。'
+        return 1
+    }
+    say '严格模式：PC DNS IPv4 优先、AI 独立 DNS 出站、拒绝 STUN/DTLS。'
+    say '注意：视频通话/WebRTC 数据通道可能失效；LAN IPv6 仍须在客户端单独管理。'
+    say '不会覆盖已有节点/Provider；校验通过才备份替换，不重启服务。'
+    ask '将严格隐私策略合并到已安装配置？' || return
+    /bin/bash "$script" apply
+}
+privacy_audit() {
+    say 'PC 网络防泄漏检查（只读，静态配置不等于端到端安全）'
+    if [ ! -f "$CONFIG" ]; then say '未安装配置。'; return 1; fi
+    if ! command -v jq >/dev/null 2>&1; then say 'jq 未安装。'; return 1; fi
+    jq -r '
+       "IPv6 DNS NODATA: " + (if any(.dns.rules[]?;
+           .action=="predefined" and .query_type==["AAAA"] and .rcode=="NOERROR")
+           then "已配置" else "未配置" end),
+       "AI DoH 使用 ai 出站: " + (if any(.dns.servers[]?;
+           .tag=="dns-ai" and .detour=="ai") then "已配置" else "未配置" end),
+       "AI 独立 DNS 规则: " + (if any(.dns.rules[]?;
+           .server=="dns-ai") then "已配置" else "未配置" end),
+       "WebRTC STUN/DTLS 严格阻断: " + (if any(.route.rules[]?;
+           .action=="reject" and .type=="logical" and
+           any(.rules[]?; .protocol? == ["stun","dtls"]))
+           then "已配置" else "未配置" end),
+       "LAN mixed HTTP/SOCKS5: " + ([.inbounds[]? | select(.tag=="lan-mixed")
+           | "\(.listen):\(.listen_port), 账号数=\((.users // []) | length)"]
+           | if length==0 then "未配置" else .[] end)
+    ' "$CONFIG" || return
+    if command -v ip >/dev/null 2>&1; then
+        say 'OpenWrt IPv4 默认路由:'
+        ip -4 route show default || true
+        say 'OpenWrt IPv6 默认路由（不能代表 PC 的 IPv6 路由）：'
+        ip -6 route show default || true
+    fi
+    if command -v nft >/dev/null 2>&1; then
+        if nft list table inet singbox_one_arm >/dev/null 2>&1; then
+            say 'LAN nftables TProxy 表: 已加载'
+        else
+            say 'LAN nftables TProxy 表: 未加载（未开启网关模式时正常）'
+        fi
+    fi
+    say '重要：PC 必须自行检查默认网关、DNS、IPv6 路由与浏览器 WebRTC；'
+    say '手动 HTTP/SOCKS5 代理不接管 PC 系统级 DNS，也不能阻止未代理应用或 IPv6 直连。'
+}
+align_xtunnel_ebpf() {
+    root_only || return
+    script="$SB_HOME/scripts/align-xtunnel-ebpf.sh"
+    [ -f "$script" ] || script="$REPO_DIR/scripts/align-xtunnel-ebpf.sh"
+    [ -f "$script" ] || {
+        say '未找到 X-Tunnel UID 适配工具，请先更新 sing-box 公开仓库源码。'
+        return 1
+    }
+    say '读取现有 X-Tunnel 内核的真实 UID，拒绝 root UID 0。'
+    say '先验证新配置，再备份覆盖；不会重启 sing-box 或 X-Tunnel。'
+    ask '自动对齐 eBPF exclude_uid 和已运行的 X-Tunnel UID？' || return
+    /bin/bash "$script"
+}
+# Menu labels are padded by terminal cell width (CJK=2), not byte count.
+# Keep the second label at cell 33; do not format two columns with printf %-Ns.
+show_menu() {
+    printf '\n==============================================\n'
+    say ' reF1nd sing-box / OpenWrt SSH 管理菜单'
+    printf ' 核心服务: %s | LAN 网关: %s | 包管理器: %s\n' \
+        "$(service_status)" "$(gateway_status)" "$(package_manager)"
+    printf ' 配置文件: %s\n' "$CONFIG"
+    say '----------------------------------------------'
+    say '  【安装与常用】'
+    say '   1) 安装/修复核心服务           2) 更新公开仓库源码'
+    say '   3) 重启 sing-box               4) 查看服务日志'
+    say '   5) 启动 sing-box               6) 停止 sing-box'
+    say '   7) 查看服务状态                8) 配置语法检查'
+    say '  【配置与更新】'
+    say '   9) 编辑 sing-box 配置         10) 修复旧版 DNS/block 配置'
+    say '  11) 更新规则集                 12) 更新 reF1nd 内核'
+    say '  【LAN 透明网关】'
+    say '  13) 设置 LAN 透明网关          14) 查看网关状态'
+    say '  15) 关闭 LAN 网关'
+    say '  【PC 代理与隐私】'
+    say '  16) 配置 PC 的 LAN HTTP/SOCKS5 代理'
+    say '  17) 关闭 PC 的 LAN 代理入口'
+    say '  18) 应用 PC 严格隐私策略（需校验）'
+    say '  19) PC DNS/WebRTC/IPv6 防泄漏检查'
+    say '  【X-Tunnel / eBPF 诊断】'
+    say '  20) 检查 X-Tunnel 对接         21) 对齐 X-Tunnel eBPF 进程 UID'
+    say '  22) eBPF/路由诊断'
+    say '  【维护】'
+    say '  23) 卸载服务（保留配置）'
+    say '  24) 设置安装/更新下载代理'
+    say '   0) 退出'
+}
+while :; do
+    show_menu
+    printf '\nChoose an option: '
+    IFS= read -r choice || break
+    case "$choice" in
+        1) install_core ;;
+        2) source_update ;;
+        3) root_only && ask 'Restart sing-box? Proxy connections will briefly disconnect.' &&
+            preflight_xtunnel && run_sbctl restart ;;
+        4) run_sbctl logs ;;
+        5) root_only && preflight_xtunnel && run_sbctl start ;;
+        6) root_only && ask 'Stop sing-box and remove gateway rules?' && run_sbctl stop ;;
+        7) run_sbctl status ;;
+        8) run_sbctl check ;;
+        9) edit_config ;;
+        10) migrate_config ;;
+        11) root_only && run_sbctl update-rules ;;
+        12) root_only && ask 'Update sing-box core? Running service may restart.' && run_sbctl update-core ;;
+        13) configure_gateway ;;
+        14) [ -f "$GATEWAY" ] && /bin/bash "$GATEWAY" status || say 'Gateway script not installed.' ;;
+        15) disable_gateway ;;
+        16) configure_pc_proxy ;;
+        17) disable_pc_proxy ;;
+        18) apply_pc_privacy ;;
+        19) privacy_audit ;;
+        20) inspect_xtunnel ;;
+        21) align_xtunnel_ebpf ;;
+        22) diagnose; run_sbctl ebpf-status 2>/dev/null || true ;;
+        23)
+            if root_only && ask 'Uninstall sing-box services, leaving configuration and X-Tunnel untouched?'; then
+                if [ -f "$SB_HOME/uninstall.sh" ]; then
+                    /bin/bash "$SB_HOME/uninstall.sh"
+                elif [ -f "$REPO_DIR/uninstall.sh" ]; then
+                    /bin/bash "$REPO_DIR/uninstall.sh"
+                else
+                    say 'Uninstaller missing.'
+                fi
+            fi ;;
+        24) configure_download_proxy ;;
+        0|q|Q) break ;;
+        *) say 'Unknown option.' ;;
+    esac
+    wait_key
+done

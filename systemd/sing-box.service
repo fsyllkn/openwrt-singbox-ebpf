@@ -1,0 +1,44 @@
+[Unit]
+Description=SH Sing-box eBPF Transparent Proxy (reF1nd)
+Documentation=https://sing-box.sagernet.org
+After=network-online.target nss-lookup.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+
+# cgroup v2: eBPF cgroup data plane requires Delegate so sing-box can
+# manage its own cgroup subtree for self-bypass.
+Slice=sing-box.slice
+Delegate=yes
+
+ExecStartPre=/opt/sing-box/scripts/sbctl check
+ExecStartPre=/opt/sing-box/scripts/dns-guard.sh setup
+ExecStartPre=/opt/sing-box/scripts/gateway.sh apply
+ExecStart=/opt/sing-box/bin/sing-box run -c /opt/sing-box/config/config.json -D /opt/sing-box
+ExecStopPost=/opt/sing-box/scripts/gateway.sh cleanup
+ExecStopPost=/opt/sing-box/scripts/dns-guard.sh restore
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Automatic crash recovery replaces the Android watcher.sh polling loop.
+Restart=on-failure
+RestartSec=5s
+
+# sing-box may open many connections.
+LimitNOFILE=infinity
+
+WorkingDirectory=/opt/sing-box
+
+# eBPF loading requires CAP_SYS_ADMIN; network manipulation requires
+# CAP_NET_ADMIN and CAP_NET_RAW; binding privileged ports (DNS 53)
+# requires CAP_NET_BIND_SERVICE.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_SYS_ADMIN CAP_SYS_RESOURCE CAP_DAC_OVERRIDE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_SYS_ADMIN CAP_SYS_RESOURCE CAP_DAC_OVERRIDE
+
+# Do NOT set NoNewPrivileges=yes — sing-box needs to load eBPF programs
+# at runtime, which requires full CAP_SYS_ADMIN/BPF.
+NoNewPrivileges=no
+
+[Install]
+WantedBy=multi-user.target

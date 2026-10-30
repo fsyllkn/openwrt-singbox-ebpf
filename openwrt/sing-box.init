@@ -1,0 +1,235 @@
+#!/bin/sh /etc/rc.common
+# =============================================================================
+# OpenWrt procd service init script for sing-box eBPF (reF1nd)
+# Place at: /etc/init.d/sing-box
+# =============================================================================
+
+START=95
+STOP=10
+USE_PROCD=1
+
+# Resolve only when performing a service operation. rc.common and diagnostics
+# may source this file before an installation exists.
+load_service_paths() {
+    local helper_home
+    helper_home=${SH_SINGBOX_HOME:-}
+    if [ -z "$helper_home" ] && command -v uci >/dev/null 2>&1; then
+        helper_home=$(uci -q get sing-box.main.service_dir 2>/dev/null) || helper_home=
+    fi
+    helper_home=${helper_home:-/opt/sing-box}
+    case "$helper_home" in
+        /*) ;;
+        *) echo 'sing-box: service directory must be an absolute path; inspect SH_SINGBOX_HOME / sing-box.main.service_dir.' >&2
+           return 1 ;;
+    esac
+    if [ ! -r "$helper_home/scripts/runtime-paths.sh" ]; then
+        echo "sing-box: missing $helper_home/scripts/runtime-paths.sh; install the updated scripts together with sing-box.init before starting or stopping the service." >&2
+        return 1
+    fi
+    . "$helper_home/scripts/runtime-paths.sh"
+    sb_load_paths || return 1
+    SERVICE_DIR=$SH_SINGBOX_HOME
+    CONFIG=$SH_SINGBOX_CONFIG
+    BIN="$SERVICE_DIR/bin/sing-box"
+    SBCTL="$SERVICE_DIR/scripts/sbctl"
+    DNS_GUARD="$SERVICE_DIR/scripts/dns-guard.sh"
+    GATEWAY="$SERVICE_DIR/scripts/gateway.sh"
+}
+
+# Procd may ask ubus to delete an instance that was already removed.
+# OpenWrt emits 'Command failed: Not found' in that benign case. Suppress
+# ONLY that exact response, not real ubus/procd failures.
+UBUS_BIN="$(command -v ubus 2>/dev/null || printf '%s' /bin/ubus)"
+ubus() {
+    if [ "${1:-}" = call ] && [ "${2:-}" = service ] && [ "${3:-}" = delete ]; then
+        local response rc
+        rc=0
+        response="$("$UBUS_BIN" "$@" 2>&1)" || rc=$?
+        if [ "$rc" -eq 0 ]; then
+            [ -z "$response" ] || printf '%s\n' "$response"
+            return 0
+        fi
+        case "$response" in
+            "Command failed: Not found"|"Command failed: Not found"*)
+                return 0
+                ;;
+        esac
+        printf '%s\n' "$response" >&2
+        return "$rc"
+    fi
+    "$UBUS_BIN" "$@"
+}
+
+service_bool_option() {
+    local value
+    value=
+    if command -v uci >/dev/null 2>&1; then
+        value=$(uci -q get "sing-box.main.$1" 2>/dev/null) || value=
+    fi
+    case "$value" in
+        ''|1|yes|true|on) printf '1\n' ;;
+        0|no|false|off) printf '0\n' ;;
+        *) echo "sing-box: invalid boolean UCI option sing-box.main.$1" >&2; return 1 ;;
+    esac
+}
+
+cgroup_mount_type() {
+    # /proc/mounts escapes whitespace and backslashes as octal sequences.
+    # Use the closest containing mount, including a nested non-cgroup mount.
+    awk -v path="$2" '
+      function decode(s, out, i, octal, n) {
+        out = ""
+        for (i = 1; i <= length(s); i++) {
+          octal = substr(s, i + 1, 3)
+          if (substr(s, i, 1) == "\\" && octal ~ /^[0-7][0-7][0-7]$/) {
+            n = substr(octal, 1, 1) * 64 + substr(octal, 2, 1) * 8 + substr(octal, 3, 1)
+            out = out sprintf("%c", n); i += 3
+          } else out = out substr(s, i, 1)
+        }
+        return out
+      }
+      {
+        point = decode($2)
+        if ((point == "/" || path == point || index(path, point "/") == 1) && length(point) > longest) {
+          longest = length(point); kind = $3
+        }
+      }
+      END { if (longest) print kind }
+    ' "$1"
+}
+
+check_cgroup2() {
+    # Optional arguments are internal test seams; production uses these paths.
+    local mounts filesystems target mounted_type required_paths selected resolved need_default
+    mounts=${1:-/proc/mounts}
+    filesystems=${2:-/proc/filesystems}
+    target=${3:-/sys/fs/cgroup}
+    required_paths=$(jq -r '
+      [.inbounds[]? | select(.type == "ebpf")
+       | select(.local.enabled == true or (.local.enabled == null and .shared.enabled == null))
+       | select((.local.data_plane // "") == "" or .local.data_plane == "cgroup")
+       | (.local.cgroup_path // "")
+       | if . == "" then "@default"
+         elif type != "string" or test("[\r\n]") then error("invalid cgroup path")
+         else . end] | unique | join("\n")
+    ' "$CONFIG") || {
+        echo 'sing-box: cannot determine cgroup requirements from configuration.' >&2
+        return 1
+    }
+    [ -n "$required_paths" ] || return 0
+    need_default=0
+    while IFS= read -r selected; do
+        if [ "$selected" = @default ]; then need_default=1; continue; fi
+        case "$selected" in
+            /*) ;;
+            *) echo 'sing-box: configured local.cgroup_path must be absolute.' >&2; return 1 ;;
+        esac
+        [ -d "$selected" ] && resolved=$(readlink -f "$selected") || {
+            echo "sing-box: configured cgroup subtree does not exist: $selected. No mount was changed." >&2
+            return 1
+        }
+        mounted_type=$(cgroup_mount_type "$mounts" "$resolved") || return 1
+        [ "$mounted_type" = cgroup2 ] || {
+            echo "sing-box: configured subtree $selected belongs to ${mounted_type:-no visible mounted filesystem}, not cgroup2. No mount was changed." >&2
+            return 1
+        }
+    done <<EOF
+$required_paths
+EOF
+    [ "$need_default" -eq 1 ] || return 0
+    # The core discovers the visible cgroup2 hierarchy; it need not be mounted
+    # at the conventional path if this firmware already provides one elsewhere.
+    if awk '$3 == "cgroup2" { found = 1 } END { exit !found }' "$mounts"; then return 0; fi
+    mounted_type=$(awk -v target="$target" '$2 == target { print $3; exit }' "$mounts") || return 1
+    if [ -n "$mounted_type" ]; then
+        echo "sing-box: local cgroup eBPF requires cgroup2 at $target; $mounted_type is already mounted there. Select compatible firmware/cgroup configuration. No mount was replaced." >&2
+        return 1
+    fi
+    if ! awk '$NF == "cgroup2" { found = 1 } END { exit !found }' "$filesystems"; then
+        echo 'sing-box: firmware lacks cgroup2 support required by configured local eBPF. Use firmware with cgroup v2/BPF support; core was not started.' >&2
+        return 1
+    fi
+    mkdir -p "$target" && mount -t cgroup2 none "$target" || {
+        echo "sing-box: cannot mount cgroup2 at $target; check firmware capabilities and container privileges. Core was not started." >&2
+        return 1
+    }
+    awk -v target="$target" '$2 == target && $3 == "cgroup2" { found = 1 } END { exit !found }' "$mounts" || {
+        echo "sing-box: cgroup2 mount at $target could not be verified; core was not started." >&2
+        return 1
+    }
+}
+
+start_service() {
+    local enabled auto_dns
+    enabled=$(service_bool_option enabled) || return 1
+    [ "$enabled" = 1 ] || { echo 'sing-box: service disabled by sing-box.main.enabled'; return 0; }
+    auto_dns=$(service_bool_option auto_dns) || return 1
+    load_service_paths || return 1
+    [ -x "$BIN" ] || {
+        echo "sing-box binary not found or not executable: $BIN" >&2
+        return 1
+    }
+    [ -f "$CONFIG" ] || {
+        echo "sing-box config not found: $CONFIG" >&2
+        return 1
+    }
+
+    echo "sing-box: startup configuration: $CONFIG (service directory: $SERVICE_DIR)"
+    [ -x "$SBCTL" ] || {
+        echo "sing-box: missing startup preflight controller: $SBCTL; install the updated scripts. Core was not started." >&2
+        return 1
+    }
+    # Syntax may be cached, but local listener addresses must be checked again
+    # on every start. Exported selectors keep all helpers on the same config.
+    "$SBCTL" preflight || {
+        echo 'sing-box: startup preflight failed; core was not started.' >&2
+        return 1
+    }
+
+    # Check only the data plane actually configured. Unsupported firmware must
+    # fail before DNS or gateway state changes, without replacing a v1 mount.
+    check_cgroup2 || return 1
+
+    # Activate DNS takeover if dns-guard is available
+    if [ "$auto_dns" = 1 ] && [ -x "$DNS_GUARD" ]; then
+        "$DNS_GUARD" setup || {
+            echo 'sing-box: DNS setup failed; core was not started.' >&2
+            "$DNS_GUARD" restore || echo 'sing-box: DNS restore failed; inspect dns-guard diagnostics.' >&2
+            return 1
+        }
+    fi
+    if [ -x "$GATEWAY" ]; then
+        "$GATEWAY" apply || {
+            echo 'sing-box: gateway setup failed; core was not started.' >&2
+            if [ "$auto_dns" = 1 ] && [ -x "$DNS_GUARD" ]; then
+                "$DNS_GUARD" restore || echo 'sing-box: DNS restore failed; inspect dns-guard diagnostics.' >&2
+            fi
+            return 1
+        }
+    fi
+
+    procd_open_instance
+    procd_set_param command "$BIN" run -c "$CONFIG" -D "$SERVICE_DIR"
+    procd_set_param respawn 3600 5 0
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_set_param limits nofile="infinity"
+    procd_close_instance
+}
+
+stop_service() {
+    local gateway_rc=0
+    load_service_paths || return 1
+    if [ -x "$GATEWAY" ]; then
+        "$GATEWAY" cleanup || gateway_rc=$?
+    fi
+    # Always attempt DNS restoration, but do not hide a gateway cleanup error.
+    if [ -x "$DNS_GUARD" ]; then
+        "$DNS_GUARD" restore || return 1
+    fi
+    return "$gateway_rc"
+}
+
+reload_service() {
+    procd_send_signal sing-box
+}

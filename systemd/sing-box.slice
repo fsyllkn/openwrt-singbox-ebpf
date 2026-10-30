@@ -1,0 +1,9 @@
+[Slice]
+Description=Sing-box eBPF Transparent Proxy Resource Isolation
+
+# Memory limit: prevent runaway processes from exhausting system RAM.
+MemoryMax=512M
+MemoryHigh=384M
+
+# CPU quota: leave headroom for the rest of the system.
+CPUQuota=80%

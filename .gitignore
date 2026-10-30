@@ -1,0 +1,33 @@
+# Installed runtime state and downloaded assets
+/bin/
+/board/
+/geo/
+/runtime/
+
+# Only the empty provider template and its instructions are public source.
+/providers/*
+!/providers/provider.template.json
+!/providers/README.md
+
+# Local configuration backups, staging files and private environment files
+/config/.*
+/config/*.bak
+/config/*.bak.*
+/config/*.before-*
+/config/*.menu.*
+/config/*.gateway.*
+/config/*.import.*
+*.log
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Local build/download artifacts
+*.zip
+*.tar.gz
+*.tgz
+__pycache__/
+*.pyc

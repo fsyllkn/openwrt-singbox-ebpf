@@ -1,0 +1,477 @@
+{
+  "$schema": "https://sing-box.sagernet.org/schema.json",
+  "log": {
+    "disabled": false,
+    "level": "info",
+    "timestamp": true
+  },
+  "dns": {
+    "servers": [
+      {
+        "type": "group",
+        "tag": "dns-proxy",
+        "servers": [
+          "dns-cloudflare",
+          "dns-google"
+        ]
+      },
+      {
+        "type": "group",
+        "tag": "dns-direct",
+        "servers": [
+          "dns-ali",
+          "dns-tencent"
+        ]
+      },
+      {
+        "type": "hosts",
+        "tag": "dns-hosts",
+        "predefined": {
+          "cloudflare-dns.com": [
+            "1.1.1.1",
+            "1.0.0.1"
+          ],
+          "dns.google": [
+            "8.8.8.8",
+            "8.8.4.4"
+          ],
+          "dns.alidns.com": [
+            "223.5.5.5",
+            "223.6.6.6"
+          ],
+          "doh.pub": [
+            "120.53.53.53",
+            "1.12.12.12"
+          ]
+        }
+      },
+      {
+        "type": "fakeip",
+        "tag": "dns-fakeip",
+        "inet4_range": "198.18.0.0/15",
+        "inet6_range": "2001:db8::/32"
+      },
+      {
+        "type": "https",
+        "tag": "dns-cloudflare",
+        "server": "cloudflare-dns.com",
+        "path": "/dns-query",
+        "domain_resolver": "dns-hosts",
+        "detour": "proxy"
+      },
+      {
+        "type": "https",
+        "tag": "dns-google",
+        "server": "dns.google",
+        "path": "/dns-query",
+        "domain_resolver": "dns-hosts",
+        "detour": "proxy"
+      },
+      {
+        "type": "https",
+        "tag": "dns-ai",
+        "server": "cloudflare-dns.com",
+        "path": "/dns-query",
+        "domain_resolver": "dns-hosts",
+        "detour": "ai"
+      },
+      {
+        "type": "https",
+        "tag": "dns-ali",
+        "server": "dns.alidns.com",
+        "path": "/dns-query",
+        "domain_resolver": "dns-hosts"
+      },
+      {
+        "type": "https",
+        "tag": "dns-tencent",
+        "server": "doh.pub",
+        "path": "/dns-query",
+        "domain_resolver": "dns-hosts"
+      }
+    ],
+    "rules": [
+      {
+        "query_type": [
+          "AAAA"
+        ],
+        "action": "predefined",
+        "rcode": "NOERROR"
+      },
+      {
+        "domain": [
+          "servd-anthropic-website.b-cdn.net"
+        ],
+        "domain_suffix": [
+          "anthropic.com",
+          "claude.ai",
+          "claude.com",
+          "clau.de",
+          "claudemcpclient.com",
+          "claudemcpcontent.com",
+          "claudeusercontent.com",
+          "openai.com",
+          "chatgpt.com",
+          "oaistatic.com",
+          "oaiusercontent.com",
+          "perplexity.ai",
+          "grok.com",
+          "x.ai",
+          "poe.com",
+          "character.ai",
+          "mistral.ai",
+          "cohere.com",
+          "gemini.google.com",
+          "aistudio.google.com",
+          "generativelanguage.googleapis.com",
+          "deepseek.com"
+        ],
+        "action": "route",
+        "server": "dns-ai"
+      },
+      {
+        "rule_set": [
+          "ads"
+        ],
+        "action": "reject"
+      },
+      {
+        "domain_suffix": [
+          "googleapis.cn",
+          "xn--ngstr-lra8j.com"
+        ],
+        "action": "route",
+        "server": "dns-proxy"
+      },
+      {
+        "rule_set": [
+          "networktest"
+        ],
+        "action": "route",
+        "server": "dns-proxy"
+      },
+      {
+        "rule_set": [
+          "private",
+          "google-cn",
+          "cn"
+        ],
+        "action": "route",
+        "server": "dns-direct"
+      },
+      {
+        "query_type": [
+          "HTTPS",
+          "SVCB"
+        ],
+        "action": "predefined",
+        "rcode": "NOERROR"
+      },
+      {
+        "query_type": [
+          "A",
+          "AAAA"
+        ],
+        "action": "route",
+        "server": "dns-fakeip"
+      }
+    ],
+    "final": "dns-proxy",
+    "optimistic": true,
+    "reverse_mapping": true,
+    "strategy": "prefer_ipv4",
+    "timeout": "5s"
+  },
+  "experimental": {
+    "cache_file": {
+      "enabled": true,
+      "store_fakeip": true,
+      "store_dns": true,
+      "cache_id": "linux-singbox-openwrt"
+    },
+    "clash_api": {
+      "external_controller": "127.0.0.1:9090",
+      "external_ui": "/opt/sing-box/board/dist",
+      "external_ui_download_url": "https://github.com/zephyruso/zashboard/releases/latest/download/dist-no-fonts.zip",
+      "default_mode": "Rule"
+    }
+  },
+  "http_clients": [
+    {
+      "tag": "http_cli",
+      "detour": "proxy"
+    }
+  ],
+  "inbounds": [
+    {
+      "type": "ebpf",
+      "local": {
+        "enabled": true,
+        "data_plane": "cgroup",
+        "dns_mode": "respect_policy",
+        "ipv6": true,
+        "bypass_private_address": false,
+        "include_uid": [],
+        "exclude_uid": [],
+        "exclude_uid_range": []
+      },
+      "network": [
+        "tcp",
+        "udp"
+      ],
+      "udp_timeout": "5m"
+    },
+    {
+      "type": "mixed",
+      "tag": "lan-mixed",
+      "listen": "127.0.0.1",
+      "listen_port": 7891,
+      "users": []
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "selector",
+      "tag": "proxy",
+      "outbounds": [
+        "configure-your-proxy"
+      ],
+      "default": "configure-your-proxy",
+      "interrupt_exist_connections": true
+    },
+    {
+      "type": "selector",
+      "tag": "ai",
+      "outbounds": [
+        "proxy"
+      ],
+      "default": "proxy",
+      "interrupt_exist_connections": true
+    },
+    {
+      "type": "socks",
+      "tag": "configure-your-proxy",
+      "server": "127.0.0.1",
+      "server_port": 1080,
+      "version": "5"
+    },
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ],
+  "route": {
+    "auto_detect_interface": true,
+    "final": "proxy",
+    "default_domain_resolver": "dns-direct",
+    "rules": [
+      {
+        "type": "logical",
+        "mode": "or",
+        "rules": [
+          {
+            "protocol": "dns"
+          },
+          {
+            "port": 53
+          }
+        ],
+        "action": "hijack-dns"
+      },
+      {
+        "action": "sniff"
+      },
+      {
+        "type": "logical",
+        "mode": "or",
+        "rules": [
+          {
+            "protocol": [
+              "stun",
+              "dtls"
+            ]
+          },
+          {
+            "network": "udp",
+            "port": [
+              3478,
+              5349
+            ]
+          },
+          {
+            "network": "udp",
+            "port_range": [
+              "19302:19309"
+            ]
+          }
+        ],
+        "action": "reject",
+        "method": "drop"
+      },
+      {
+        "process_name": [
+          "sshd",
+          "tailscaled",
+          "zerotier-one"
+        ],
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
+        "protocol": "quic",
+        "domain": [
+          "servd-anthropic-website.b-cdn.net"
+        ],
+        "domain_suffix": [
+          "anthropic.com",
+          "clau.de",
+          "claude.ai",
+          "claude.com",
+          "claudemcpclient.com",
+          "claudemcpcontent.com",
+          "claudeusercontent.com"
+        ],
+        "action": "reject"
+      },
+      {
+        "protocol": "quic",
+        "rule_set": [
+          "networktest"
+        ],
+        "action": "reject"
+      },
+      {
+        "domain": [
+          "servd-anthropic-website.b-cdn.net"
+        ],
+        "domain_suffix": [
+          "anthropic.com",
+          "claude.ai",
+          "claude.com",
+          "clau.de",
+          "claudemcpclient.com",
+          "claudemcpcontent.com",
+          "claudeusercontent.com",
+          "openai.com",
+          "chatgpt.com",
+          "oaistatic.com",
+          "oaiusercontent.com",
+          "perplexity.ai",
+          "grok.com",
+          "x.ai",
+          "poe.com",
+          "character.ai",
+          "mistral.ai",
+          "cohere.com",
+          "gemini.google.com",
+          "aistudio.google.com",
+          "generativelanguage.googleapis.com",
+          "deepseek.com"
+        ],
+        "action": "route",
+        "outbound": "ai"
+      },
+      {
+        "domain_suffix": [
+          "dnscheck.tools",
+          "addr.tools",
+          "net.coffee",
+          "browserleaks.com",
+          "ipleak.net",
+          "dnsleaktest.com",
+          "test-ipv6.com"
+        ],
+        "action": "route",
+        "outbound": "proxy"
+      },
+      {
+        "rule_set": [
+          "ads"
+        ],
+        "action": "reject"
+      },
+      {
+        "rule_set": [
+          "private"
+        ],
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
+        "ip_is_private": true,
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
+        "rule_set": [
+          "google-cn",
+          "apple-cn",
+          "games-cn",
+          "cn",
+          "cnip"
+        ],
+        "action": "route",
+        "outbound": "direct"
+      }
+    ],
+    "rule_set": [
+      {
+        "type": "remote",
+        "tag": "cnip",
+        "format": "binary",
+        "url": "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/cnip.srs",
+        "download_detour": "direct"
+      },
+      {
+        "type": "remote",
+        "tag": "private",
+        "format": "binary",
+        "url": "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/private.srs",
+        "download_detour": "direct"
+      },
+      {
+        "type": "remote",
+        "tag": "cn",
+        "format": "binary",
+        "url": "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/cn.srs",
+        "download_detour": "direct"
+      },
+      {
+        "type": "remote",
+        "tag": "google-cn",
+        "format": "binary",
+        "url": "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/google-cn.srs",
+        "download_detour": "direct"
+      },
+      {
+        "type": "remote",
+        "tag": "apple-cn",
+        "format": "binary",
+        "url": "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/apple-cn.srs",
+        "download_detour": "direct"
+      },
+      {
+        "type": "remote",
+        "tag": "games-cn",
+        "format": "binary",
+        "url": "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/games-cn.srs",
+        "download_detour": "direct"
+      },
+      {
+        "type": "remote",
+        "tag": "ads",
+        "format": "binary",
+        "url": "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/ads.srs",
+        "download_detour": "direct"
+      },
+      {
+        "type": "remote",
+        "tag": "networktest",
+        "format": "binary",
+        "url": "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/networktest.srs",
+        "download_detour": "proxy"
+      }
+    ]
+  },
+  "providers": []
+}

@@ -1,0 +1,786 @@
+#!/usr/bin/env bash
+# =============================================================================
+# sbctl — SH Sing-box Linux Service Controller
+#
+# Supports Debian, Ubuntu, and OpenWrt on both amd64 and arm64.
+# Integrates with systemd on Debian/Ubuntu and procd on OpenWrt.
+# Provides service lifecycle, validation cache, eBPF diagnostics,
+# traffic takeover mode/filtering management, and leak testing.
+# =============================================================================
+set -euo pipefail
+
+SBCTL_FILE="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
+PATHS_HELPER="$(dirname "$SBCTL_FILE")/runtime-paths.sh"
+[ -r "$PATHS_HELPER" ] || { echo "Missing $PATHS_HELPER; deploy the updated scripts together." >&2; exit 1; }
+. "$PATHS_HELPER"
+sb_load_paths || exit 1
+SERVICE_DIR="$SH_SINGBOX_HOME"
+BIN="$SERVICE_DIR/bin/sing-box"
+CONFIG="$SH_SINGBOX_CONFIG"
+RUNTIME_DIR="$SERVICE_DIR/runtime"
+CHECK_LOG="$RUNTIME_DIR/config-check.log"
+VALID_CACHE="$RUNTIME_DIR/config.valid"
+CACHE_SCHEMA="5"
+SYSTEMD_UNIT="sing-box.service"
+OPENWRT_INIT="/etc/init.d/sing-box"
+
+mkdir -p "$RUNTIME_DIR" 2>/dev/null || true
+
+# -----------------------------------------------------------------------------
+# Output Helpers
+# -----------------------------------------------------------------------------
+ts() { date '+%Y-%m-%d %H:%M:%S'; }
+msg()  { echo "[$(ts)] $*"; }
+ok()   { echo -e "\033[32m✓\033[0m $*"; }
+err()  { echo -e "\033[31m✗\033[0m $*" >&2; }
+warn() { echo -e "\033[33m!\033[0m $*"; }
+info() { echo -e "\033[36mℹ\033[0m $*"; }
+die()  { err "$*"; exit 1; }
+
+# -----------------------------------------------------------------------------
+# Init System Detection
+# -----------------------------------------------------------------------------
+detect_init() {
+    if [ -f /etc/openwrt_release ] || ! command -v systemctl >/dev/null 2>&1; then
+        echo "procd"
+    else
+        echo "systemd"
+    fi
+}
+
+INIT_SYSTEM="$(detect_init)"
+
+# -----------------------------------------------------------------------------
+# Basic File Checks
+# -----------------------------------------------------------------------------
+check_files() {
+    [ -f "$BIN" ]    || die "sing-box binary not found: $BIN"
+    [ -f "$CONFIG" ] || die "config not found: $CONFIG"
+    [ -x "$BIN" ]    || chmod 0755 "$BIN" 2>/dev/null
+    [ -x "$BIN" ]    || die "sing-box is not executable"
+}
+
+is_service_running() {
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
+        systemctl is-active --quiet "$SYSTEMD_UNIT" 2>/dev/null
+    else
+        [ -x "$OPENWRT_INIT" ] && "$OPENWRT_INIT" status >/dev/null 2>&1
+    fi
+}
+
+# -----------------------------------------------------------------------------
+# Validation Cache
+# -----------------------------------------------------------------------------
+file_stamp() {
+    local target="$1" stamp sum_line
+    # BusyBox stat builds do not all support the same -c directives.
+    # Accept a stamp only when all three fields are numeric.
+    if command -v stat >/dev/null 2>&1; then
+        stamp="$(stat -c '%s:%Y:%i' "$target" 2>/dev/null)" || stamp=
+        case "$stamp" in
+            *[!0-9:]*|""|:*|*:) ;;
+            *:*:*) printf '%s\n' "$stamp"; return 0 ;;
+        esac
+    fi
+    if command -v cksum >/dev/null 2>&1; then
+        sum_line="$(cksum "$target" 2>/dev/null)" || return 1
+        set -- $sum_line
+        [ "$#" -ge 2 ] || return 1
+        case "$1:$2" in *[!0-9:]*|*:|:*) return 1 ;; esac
+        printf '%s:%s\n' "$1" "$2"
+        return 0
+    fi
+    return 1
+}
+
+validation_key() {
+    local config_stamp bin_stamp
+    # A same-size edit within one second can retain stat's size/mtime/inode.
+    # Hash the small JSON every time; keep the large binary's cheap stamp.
+    config_stamp="$(cksum < "$CONFIG")" || return 1
+    bin_stamp="$(file_stamp "$BIN")" || return 1
+    printf '%s|%s|%s|%s|%s\n' "$CACHE_SCHEMA" "$CONFIG" "$config_stamp" "$BIN" "$bin_stamp"
+}
+
+cache_is_valid() {
+    [ -f "$VALID_CACHE" ] || return 1
+    local current_key cached_key
+    current_key="$(validation_key)" || return 1
+    cached_key="$(cat "$VALID_CACHE" 2>/dev/null)"
+    [ -n "$cached_key" ] && [ "$cached_key" = "$current_key" ]
+}
+
+write_validation_cache() {
+    local current_key
+    if ! current_key="$(validation_key)"; then
+        warn "Kernel validation succeeded, but stat/cksum could not fingerprint the config or binary."
+        return 1
+    fi
+    if ! printf '%s\n' "$current_key" > "$VALID_CACHE"; then
+        warn "Kernel validation succeeded, but cannot write the cache at $VALID_CACHE."
+        return 1
+    fi
+    return 0
+}
+
+validate_config_full() {
+    rm -f "$VALID_CACHE" 2>/dev/null || true
+    : > "$CHECK_LOG" || {
+        err "Cannot write configuration check log: $CHECK_LOG"
+        return 1
+    }
+
+    # On OpenWrt, the reF1nd check may resolve remote providers/rule-sets.
+    # Bound the wait so procd cannot block indefinitely during service start.
+    # Keep the working directory required by relative rule-set paths.
+    local check_status=0 max_seconds
+    max_seconds="${SB_CHECK_TIMEOUT:-90}"
+    case "$max_seconds" in
+        ''|*[!0-9]*) err "SB_CHECK_TIMEOUT must be an integer number of seconds"; return 1 ;;
+    esac
+    if [ "$INIT_SYSTEM" = "procd" ] && command -v timeout >/dev/null 2>&1; then
+        (cd "$SERVICE_DIR" && timeout "$max_seconds" "$BIN" check -c "$CONFIG") >> "$CHECK_LOG" 2>&1 || check_status=$?
+    elif [ "$INIT_SYSTEM" = "procd" ] && command -v busybox >/dev/null 2>&1 &&
+         busybox --list 2>/dev/null | grep -qx timeout; then
+        (cd "$SERVICE_DIR" && busybox timeout "$max_seconds" "$BIN" check -c "$CONFIG") >> "$CHECK_LOG" 2>&1 || check_status=$?
+    else
+        (cd "$SERVICE_DIR" && "$BIN" check -c "$CONFIG") >> "$CHECK_LOG" 2>&1 || check_status=$?
+        if [ "$INIT_SYSTEM" = "procd" ]; then
+            warn "timeout applet unavailable; check duration is not bounded"
+        fi
+    fi
+    if [ "$check_status" -eq 0 ]; then
+        # Validation cache is only an optimization. An unavailable cache must
+        # never turn a passing sing-box check into a failed procd startup.
+        if write_validation_cache; then
+            info "Kernel check passed; validation cache refreshed."
+        else
+            warn "Kernel check passed; proceeding without a validation cache."
+        fi
+        return 0
+    fi
+
+    if [ "$check_status" -eq 124 ]; then
+        err "Configuration check timed out after ${max_seconds}s (remote providers, DNS, network or resource pressure)."
+    elif [ "$check_status" -eq 137 ] || [ "$check_status" -eq 143 ]; then
+        err "Configuration check was terminated (exit $check_status); inspect logread/dmesg for OOM or signals."
+    else
+        err "Configuration check failed (exit $check_status)."
+    fi
+    err "Check log: $CHECK_LOG"
+    tail -n 30 "$CHECK_LOG" 2>/dev/null || true
+    return 1
+}
+
+# -----------------------------------------------------------------------------
+# Lifecycle Commands
+# -----------------------------------------------------------------------------
+cmd_config() {
+    info "Service directory: $SERVICE_DIR"
+    info "Configuration file: $CONFIG"
+    [ -f "$CONFIG" ] || { err "Configuration file does not exist."; return 1; }
+    command -v jq >/dev/null 2>&1 || { err "jq is required to inspect listeners."; return 1; }
+    # Deliberately exclude accounts, provider URLs, keys and API secrets.
+    jq -r '.inbounds[]? | select(.listen? != null)
+        | "  inbound \(.tag // .type): \(.type) \(.listen):\(.listen_port // "-")"' "$CONFIG"
+    if [ -f "$RUNTIME_DIR/gateway.json" ]; then
+        jq -r '"  gateway: \(.interface) / \(.source_cidr) (separate LAN source subnet)"' "$RUNTIME_DIR/gateway.json"
+    fi
+}
+
+# The core accepts scalar-or-array UID selectors and inclusive start:end
+# ranges. Match its decimal/hex/octal/binary uint32 syntax without shell eval.
+uid_policy_jq() {
+    cat <<'JQ'
+def items: if .==null then [] elif type=="array" then . else [.] end;
+def local_enabled:
+  .type=="ebpf" and (.local.enabled==true
+    or (.local.enabled==null and .shared.enabled==null));
+def u32:
+  (if type=="number" then .
+   elif type=="string" then
+     (ascii_downcase
+      | if test("^(0x_?[0-9a-f]+(_[0-9a-f]+)*|0o_?[0-7]+(_[0-7]+)*|0b_?[01]+(_[01]+)*|0(_?[0-7]+)+|0|[1-9][0-9]*(_[0-9]+)*)$")
+        then gsub("_";"") else error("Unsupported UID number") end) as $s
+     | (if $s|test("^0x[0-9a-f]+$") then [16,$s[2:]]
+        elif $s|test("^0o[0-7]+$") then [8,$s[2:]]
+        elif $s|test("^0b[01]+$") then [2,$s[2:]]
+        elif $s|test("^0[0-7]+$") then [8,$s[1:]]
+        elif $s|test("^(0|[1-9][0-9]*)$") then [10,$s]
+        else error("Unsupported UID number") end) as $parts
+     | reduce ($parts[1]|explode[]) as $c
+         (0; .*$parts[0] + (if $c<=57 then $c-48 else $c-87 end))
+   else error("Invalid UID type") end)
+  | if .>=0 and .<=4294967295 and floor==. then . else error("UID is outside uint32") end;
+def ranges_contain($uid):
+  items | any(.[];
+    split(":") as $pair
+    | if ($pair|length)!=2 then error("UID range must be start:end") else . end
+    | ($pair[0]|u32) as $first | ($pair[1]|u32) as $last
+    | if $first>$last then error("UID range is reversed")
+      else $uid>=$first and $uid<=$last end);
+def captures_uid($uid):
+  . as $local
+  | (.include_uid|items|map(u32)) as $included
+  | (.exclude_uid|items|map(u32)) as $excluded
+  | ((($included|length)==0 and ($local.include_uid_range|items|length)==0)
+     or ($included|index($uid))!=null
+     or ($local.include_uid_range|ranges_contain($uid)))
+    and (($excluded|index($uid))==null)
+    and (($local.exclude_uid_range|ranges_contain($uid))|not);
+JQ
+}
+
+check_xtunnel_exclusions() {
+    local pids pid credentials real effective saved fs extra risk policy active
+    command -v jq >/dev/null 2>&1 || { err "jq is required for X-Tunnel UID preflight."; return 1; }
+    policy="$(uid_policy_jq)"
+    active="$(jq -r "$policy"'any(.inbounds[]?; local_enabled)' "$CONFIG")" || {
+        err "Cannot inspect eBPF configuration for X-Tunnel UID preflight."; return 1;
+    }
+    [ "$active" = true ] || return 0
+    command -v pidof >/dev/null 2>&1 || { err "pidof is required to inspect upstream process UIDs."; return 1; }
+    pids="$(pidof x-tunnel 2>/dev/null || true)"
+    [ -n "$pids" ] || return 0
+    for pid in $pids; do
+        case "$pid" in ''|*[!0-9]*) err "Invalid X-Tunnel PID."; return 1 ;; esac
+        local status_file="${SB_PROC_ROOT:-/proc}/$pid/status"
+        if [ ! -r "$status_file" ]; then
+            [ ! -d "${SB_PROC_ROOT:-/proc}/$pid" ] && continue
+            err "Cannot read X-Tunnel PID $pid credentials."; return 1
+        fi
+        credentials="$(awk '/^Uid:/ {print $2, $3, $4, $5; exit}' "$status_file")"
+        read -r real effective saved fs extra <<< "$credentials"
+        case "$real:$effective:$saved:$fs" in *[!0-9:]*|:*|*:) err "Invalid UID fields for X-Tunnel PID $pid."; return 1 ;; esac
+        if [ -n "${extra:-}" ] || [ "$real" != "$effective" ] ||
+           [ "$real" != "$saved" ] || [ "$real" != "$fs" ]; then
+            err "X-Tunnel PID $pid has mixed real/effective/saved/fs UIDs; configure a consistent dedicated service UID."
+            return 1
+        fi
+        risk="$(jq -er --argjson uid "$real" "$policy"'
+            if any(.inbounds[]?; local_enabled
+                and (.local|captures_uid($uid)))
+            then "unsafe" else "safe" end
+        ' "$CONFIG")" || { err "Cannot evaluate eBPF UID selectors for X-Tunnel PID $pid."; return 1; }
+        if [ "$risk" = unsafe ]; then
+            err "X-Tunnel PID $pid (UID $real) would be captured by local eBPF."
+            err "Align the actual dedicated UID using menu 21 or configure an explicit UID exclusion in $CONFIG."
+            return 1
+        fi
+    done
+}
+
+check_listener_addresses() {
+    local listeners addresses tag listen port failed=0
+    command -v jq >/dev/null 2>&1 || { err "jq is required for listener preflight."; return 1; }
+    listeners="$(jq -r '.inbounds[]? | select(.listen? | type == "string")
+        | select(.listen | test("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$"))
+        | select(.listen != "0.0.0.0" and (.listen | startswith("127.") | not))
+        | [(.tag // .type), .listen, (.listen_port // "-" | tostring)] | @tsv' "$CONFIG")" || {
+        err "Cannot inspect inbound listeners in $CONFIG"; return 1;
+    }
+    [ -n "$listeners" ] || return 0
+    command -v ip >/dev/null 2>&1 || { err "ip is required for IPv4 listener preflight (OpenWrt: ip-full)."; return 1; }
+    addresses="$(ip -4 -o addr show)" || { err "Cannot inspect local IPv4 addresses; startup cancelled."; return 1; }
+    addresses="$(printf '%s\n' "$addresses" | awk '{for (i=1;i<NF;i++) if ($i=="inet") {split($(i+1),a,"/"); print a[1]}}')"
+    while IFS=$'\t' read -r tag listen port; do
+        if ! printf '%s\n' "$addresses" | grep -Fxq -- "$listen"; then
+            err "Inbound '$tag' binds $listen:$port, but $listen is not assigned to this host."
+            failed=1
+        fi
+    done <<< "$listeners"
+    if [ "$failed" -ne 0 ]; then
+        err "Edit the active configuration: $CONFIG"
+        err "Editing a source checkout does not replace the installed config. Use 'sbctl import-config FILE' to import it explicitly."
+        return 1
+    fi
+    ok "IPv4 listener addresses are assigned to this host"
+}
+
+cmd_preflight() {
+    cmd_check || return 1
+    # Interface addresses can change without a JSON edit. Never cache this.
+    check_listener_addresses || return 1
+    check_xtunnel_exclusions
+}
+
+cmd_import_config() (
+    umask 077
+    [ "$#" -eq 1 ] || die "Usage: sbctl import-config FILE"
+    [ "$(id -u)" -eq 0 ] || die "Run as root to replace the installed configuration."
+    local source="$1" target candidate backup
+    [ -f "$source" ] || die "Import file not found: $source"
+    target="$(readlink -f "$CONFIG")" || die "Cannot resolve destination: $CONFIG"
+    [ -f "$target" ] || die "Installed configuration not found: $CONFIG"
+    [ ! "$source" -ef "$target" ] || die "This is already the active config; edit it and run 'sbctl preflight'."
+    candidate="$(mktemp "${target}.import.XXXXXX")" || die "Cannot stage configuration beside $target"
+    trap 'rm -f "$candidate" "$VALID_CACHE" 2>/dev/null || true' EXIT
+    cp "$source" "$candidate" || die "Cannot copy import candidate"
+    chmod 0600 "$candidate"
+    info "Import source: $source"
+    info "Import destination: $target"
+    CONFIG="$candidate"
+    check_files
+    validate_config_full || { err "Import cancelled; installed config unchanged."; return 1; }
+    check_listener_addresses || { err "Import cancelled; installed config unchanged."; return 1; }
+    backup="$target.before-import.$(date +%Y%m%d-%H%M%S).$$.bak"
+    cp "$target" "$backup" || die "Cannot create backup: $backup"
+    chmod 0600 "$backup"
+    mv -f "$candidate" "$target" || die "Cannot replace configuration"
+    ok "Imported configuration; backup: $backup"
+    info "Service has not been restarted. Run 'sbctl config', then 'sbctl restart' when ready."
+)
+
+show_recent_service_logs() {
+    info "Recent service logs (may include earlier startup attempts; compare timestamps):"
+    logread -e sing-box | tail -n 25 2>/dev/null || true
+    info "Last configuration check log: $CHECK_LOG"
+    tail -n 25 "$CHECK_LOG" 2>/dev/null || true
+}
+
+cmd_check() {
+    check_files
+    info "Configuration file: $CONFIG"
+    if cache_is_valid; then
+        ok "Configuration valid (cached)"
+        return 0
+    fi
+    info "Validating configuration..."
+    if validate_config_full; then
+        if cache_is_valid; then
+            ok "Configuration valid; cache refreshed"
+        else
+            ok "Configuration valid (validation cache unavailable)"
+        fi
+        return 0
+    fi
+    return 1
+}
+
+cmd_start() {
+    info "Checking configuration before sing-box startup..."
+    cmd_preflight || {
+        err "Start cancelled: configuration or local listeners did not pass preflight."
+        return 1
+    }
+
+    info "Starting sing-box ($INIT_SYSTEM)..."
+    local start_status=0
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
+        systemctl start "$SYSTEMD_UNIT" || start_status=$?
+    else
+        "$OPENWRT_INIT" start || start_status=$?
+    fi
+    if [ "$start_status" -ne 0 ]; then
+        err "Service start command exited $start_status."
+        if [ "$INIT_SYSTEM" = "procd" ]; then
+            show_recent_service_logs
+        fi
+        return 1
+    fi
+    local attempt
+    for attempt in 1 2 3; do
+        sleep 1
+        if is_service_running; then
+            ok "Sing-box started"
+            cmd_ebpf_status_brief
+            return 0
+        fi
+    done
+    err "Sing-box failed to start (procd reports no running process)."
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
+        journalctl -u "$SYSTEMD_UNIT" --no-pager -n 20 || true
+    else
+        show_recent_service_logs
+    fi
+    return 1
+}
+
+cmd_stop() {
+    info "Stopping sing-box ($INIT_SYSTEM)..."
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
+        systemctl stop "$SYSTEMD_UNIT"
+    else
+        "$OPENWRT_INIT" stop
+    fi
+    ok "Sing-box stopped"
+}
+
+cmd_restart() {
+    # Preflight while the old instance is still available. Remote provider and
+    # rule-set downloads may depend on that running proxy. Never stop a healthy
+    # service when the new config cannot pass validation.
+    info "Preflight validation before stopping the current sing-box..."
+    cmd_preflight || {
+        err "Restart cancelled: existing sing-box service was NOT stopped."
+        return 1
+    }
+
+    info "Restarting sing-box ($INIT_SYSTEM)..."
+    local restart_status=0
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
+        systemctl restart "$SYSTEMD_UNIT" || restart_status=$?
+    else
+        "$OPENWRT_INIT" restart || restart_status=$?
+    fi
+    if [ "$restart_status" -ne 0 ]; then
+        err "Service restart command exited $restart_status."
+        if [ "$INIT_SYSTEM" = "procd" ]; then
+            show_recent_service_logs
+        fi
+        return 1
+    fi
+
+    local attempt
+    for attempt in 1 2 3; do
+        sleep 1
+        if is_service_running; then
+            ok "Sing-box restarted"
+            cmd_ebpf_status_brief
+            return 0
+        fi
+    done
+    err "Sing-box failed to restart (procd reports no running process)."
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
+        journalctl -u "$SYSTEMD_UNIT" --no-pager -n 20 || true
+    else
+        show_recent_service_logs
+    fi
+    return 1
+}
+
+cmd_status() {
+    echo "════════════════════════════════════════════"
+    echo "  SH Sing-box Linux eBPF Status ($INIT_SYSTEM)"
+    echo "════════════════════════════════════════════"
+    echo ""
+    cmd_config || true
+
+    if is_service_running; then
+        ok "Service: \033[32mRUNNING\033[0m"
+        if [ "$INIT_SYSTEM" = "systemd" ]; then
+            local pid
+            pid="$(systemctl show -p MainPID --value "$SYSTEMD_UNIT" 2>/dev/null)"
+            [ -n "$pid" ] && [ "$pid" != "0" ] && info "PID: $pid"
+        fi
+    else
+        err "Service: \033[31mSTOPPED\033[0m"
+    fi
+
+    if [ -x "$BIN" ]; then
+        local ver
+        ver="$("$BIN" version 2>/dev/null | head -n 1)"
+        info "Core: ${ver:-unknown}"
+    fi
+
+    if cache_is_valid; then
+        ok "Config: valid (cached)"
+    else
+        warn "Config: not validated (run 'sbctl check')"
+    fi
+
+    echo ""
+    echo "────────────────────────────────────────────"
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
+        systemctl status "$SYSTEMD_UNIT" --no-pager -l 2>/dev/null || true
+    else
+        "$OPENWRT_INIT" status 2>/dev/null || true
+    fi
+}
+
+cmd_logs() {
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
+        local args=()
+        if [ $# -eq 0 ]; then
+            args=(-u "$SYSTEMD_UNIT" --no-pager -n 50)
+        else
+            args=(-u "$SYSTEMD_UNIT" "$@")
+        fi
+        journalctl "${args[@]}"
+    else
+        if [ "${1:-}" = "-f" ]; then
+            logread -f -e sing-box
+        else
+            logread -e sing-box | tail -n 50
+        fi
+    fi
+}
+
+cmd_ebpf_status() {
+    check_files
+    if ! is_service_running; then
+        warn "Sing-box is not running. Showing kernel capability check only."
+        echo ""
+        "$BIN" tools ebpf status 2>&1 || true
+        return 0
+    fi
+
+    echo "════════════════════════════════════════════"
+    echo "  eBPF Diagnostic"
+    echo "════════════════════════════════════════════"
+    echo ""
+
+    info "Kernel capability check:"
+    "$BIN" tools ebpf status 2>&1 || true
+
+    echo ""
+    info "Runtime eBPF state:"
+    # "sing-box api ebpf" is a client of the dedicated gRPC API service.
+    # It is NOT the experimental.clash_api listener. Running the CLI without
+    # --url always prints a misleading FATAL even when eBPF works normally.
+    # Never change a working proxy configuration just to enable diagnostics.
+    local api_url="${BOX_API_URL:-}" api_secret="${BOX_API_SECRET:-}"
+    local api_service="" api_listen="" api_port="" api_scheme="http"
+    if [ -z "$api_url" ] && command -v jq >/dev/null 2>&1; then
+        api_service="$(jq -rc '.services[]? | select(.type == "api")' "$CONFIG" 2>/dev/null | head -n 1)" || api_service=
+        if [ -n "$api_service" ]; then
+            api_listen="$(printf '%s\n' "$api_service" | jq -r '.listen // "127.0.0.1"')" || api_listen=
+            api_port="$(printf '%s\n' "$api_service" | jq -r '.listen_port // empty')" || api_port=
+            case "$api_port" in
+                ""|*[!0-9]*)
+                    warn "Dedicated API service has no valid listen_port; runtime eBPF query skipped."
+                    return 0
+                    ;;
+            esac
+            case "$api_listen" in
+                ""|0.0.0.0) api_listen="127.0.0.1" ;;
+                "::") api_listen="::1" ;;
+            esac
+            case "$api_listen" in *:*) api_listen="[$api_listen]" ;; esac
+            if [ "$(printf '%s\n' "$api_service" | jq -r '.tls.enabled // false')" = "true" ]; then
+                api_scheme="https"
+            fi
+            api_url="$api_scheme://$api_listen:$api_port"
+            # Inherit an explicitly supplied secret; otherwise read the
+            # configured local token without printing it or using CLI args.
+            if [ -z "${BOX_API_SECRET+x}" ]; then
+                api_secret="$(printf '%s\n' "$api_service" | jq -r '.secret // ""')"
+            fi
+        fi
+    fi
+    if [ -z "$api_url" ]; then
+        warn "Dedicated sing-box API service not configured; skipping runtime eBPF query."
+        info "experimental.clash_api is a different protocol. Kernel probe above remains available."
+        info "Set BOX_API_URL only if a sing-box services[].type=api listener is already running."
+        return 0
+    fi
+    if ! BOX_API_URL="$api_url" BOX_API_SECRET="$api_secret" "$BIN" api ebpf --url "$api_url"; then
+        warn "Could not query the dedicated API at $api_url; this does not prove an eBPF runtime failure."
+        return 1
+    fi
+}
+
+cmd_ebpf_status_brief() {
+    if [ -x "$BIN" ] && is_service_running; then
+        info "eBPF: $("$BIN" tools ebpf status 2>&1 | head -n 3 | tr '\n' ' ')"
+    fi
+}
+
+# -----------------------------------------------------------------------------
+# Traffic Takeover Mode & Filtering Management (Requirement 2)
+# -----------------------------------------------------------------------------
+cmd_filter() (
+    check_files
+    command -v jq >/dev/null 2>&1 || die "jq is required to edit structured configuration."
+    local subcmd="${1:-show}" value="${2:-}" target candidate backup policy direct_tag
+    policy="$(uid_policy_jq)"
+    if [ "$subcmd" = show ]; then
+        jq -r "$policy"'
+          . as $cfg
+          | ([.outbounds[]? | select(.type=="direct") | .tag]) as $direct
+          | (.inbounds[]? | select(.type=="ebpf")
+             | "eBPF \(.tag // "(untagged)"): local.enabled=\(local_enabled)"
+               + " include_uid=\(.local.include_uid | items | tojson)"
+               + " include_uid_range=\(.local.include_uid_range | items | tojson)"
+               + " exclude_uid=\(.local.exclude_uid | items | tojson)"
+               + " exclude_uid_range=\(.local.exclude_uid_range | items | tojson)"),
+            ($cfg.route.rules[]? | select(.outbound as $tag | $direct | index($tag))
+             | select(.process_name? != null)
+             | "Direct process rule: \(.process_name | items | tojson)")
+        ' "$CONFIG"
+        return
+    fi
+    case "$subcmd" in
+        exclude-user|remove-user|include-user)
+            [[ "$value" =~ ^(0|[1-9][0-9]*)$ ]] && [ "${#value}" -le 10 ] &&
+                [ "$value" -le 4294967295 ] ||
+                die "Usage: sbctl filter $subcmd <uint32_uid>"
+            ;;
+        exclude-proc|remove-proc)
+            [ -n "$value" ] || die "Usage: sbctl filter $subcmd <process_name>"
+            ;;
+        reset) ;;
+        *) die "Usage: sbctl filter {show|exclude-proc NAME|remove-proc NAME|exclude-user UID|remove-user UID|include-user UID|reset}" ;;
+    esac
+    [ "$(id -u)" -eq 0 ] || die "Run as root to modify filtering."
+    target="$(readlink -f "$CONFIG")" || die "Cannot resolve configuration path"
+    candidate="$(mktemp "${target}.filter.XXXXXX")" || die "Cannot stage filtering update"
+    trap 'rm -f "$candidate" "$VALID_CACHE" 2>/dev/null || true' EXIT
+    chmod 0600 "$candidate"
+    case "$subcmd" in
+        exclude-user|remove-user|include-user|reset)
+            jq --arg action "$subcmd" --arg value "$value" "$policy"'
+              if any(.inbounds[]?; local_enabled) | not
+              then error("No enabled local eBPF inbound; no UID filter changed")
+              else . end
+              | .inbounds |= map(
+                  if local_enabled then
+                    if $action=="reset" then
+                      .local.include_uid=[] | .local.include_uid_range=[]
+                      | .local.exclude_uid=[] | .local.exclude_uid_range=[]
+                    elif $action=="exclude-user" then
+                      .local.exclude_uid=((.local.exclude_uid | items | map(u32)) + [($value|tonumber)] | unique)
+                    elif $action=="remove-user" then
+                      .local.exclude_uid=(.local.exclude_uid | items | map(select(u32 != ($value|tonumber))))
+                    else
+                      ($value|tonumber) as $uid
+                      | if (.local.exclude_uid_range | ranges_contain($uid))
+                        then error("UID is within exclude_uid_range; adjust that range explicitly before including it")
+                        else . end
+                      | .local.include_uid=[$uid] | .local.include_uid_range=[]
+                      | .local.exclude_uid=(.local.exclude_uid | items | map(select(u32 != $uid)))
+                    end
+                  else . end)
+            ' "$CONFIG" > "$candidate" || die "Cannot construct UID filter update"
+            ;;
+        exclude-proc|remove-proc)
+            direct_tag="$(jq -er '
+                [.outbounds[]? | select(.type=="direct") | .tag] as $tags
+                | if ($tags|index("direct")) != null then "direct"
+                  elif ($tags|length)==1 then $tags[0]
+                  else error("A unique direct outbound (or direct tag) is required") end
+            ' "$CONFIG")" || die "Cannot identify the direct outbound"
+            jq --arg action "$subcmd" --arg name "$value" --arg direct "$direct_tag" "$policy"'
+              def simple_direct:
+                .outbound==$direct and (.action // "route")=="route"
+                and (.type // "default")=="default"
+                and .process_name?!=null
+                and ((keys - ["type","action","outbound","process_name"]) | length)==0;
+              (.route.rules // []) as $rules
+              | if $action=="remove-proc" then
+                  .route.rules=($rules | map(
+                    if simple_direct then
+                      .process_name=((.process_name|items)-[$name])
+                      | select((.process_name|length)>0)
+                    else . end))
+                else
+                  ([range(0; $rules|length) | select($rules[.] | simple_direct)] | first) as $existing
+                  | if $existing != null then
+                      .route.rules[$existing].process_name=
+                        (($rules[$existing].process_name | items) + [$name] | unique)
+                    else
+                      ([range(0; $rules|length)
+                        | select($rules[.] | .outbound? != null and (.action // "route")=="route")]
+                        | first // ($rules|length)) as $position
+                      | .route.rules=($rules[:$position]
+                        + [{"process_name":[$name],"action":"route","outbound":$direct}]
+                        + $rules[$position:])
+                    end
+                end
+            ' "$CONFIG" > "$candidate" || die "Cannot construct process filter update"
+            ;;
+    esac
+    if cmp -s "$target" "$candidate"; then info "Filtering already matches the request."; return; fi
+    CONFIG="$candidate"
+    validate_config_full || { err "Filtering update cancelled; original configuration unchanged."; return 1; }
+    backup="$target.before-filter.$(date +%Y%m%d-%H%M%S).$$.bak"
+    (umask 077; cp "$target" "$backup") || die "Cannot save filtering backup"
+    chmod 0600 "$backup"
+    mv -f "$candidate" "$target" || die "Cannot replace configuration"
+    ok "Filtering updated; backup: $backup"
+    info "Other inbounds and custom destination routes were preserved. Run 'sbctl preflight' before restarting."
+)
+
+cmd_test_leak() {
+    if [ -x "$SERVICE_DIR/scripts/test-leak.sh" ]; then
+        exec "$SERVICE_DIR/scripts/test-leak.sh"
+    else
+        die "test-leak.sh not found: $SERVICE_DIR/scripts/test-leak.sh"
+    fi
+}
+
+cmd_update_core() {
+    check_files
+    if [ -x "$SERVICE_DIR/scripts/update-core.sh" ]; then
+        exec "$SERVICE_DIR/scripts/update-core.sh" "$@"
+    else
+        die "update-core.sh not found: $SERVICE_DIR/scripts/update-core.sh"
+    fi
+}
+
+cmd_update_rules() {
+    check_files
+    if [ -x "$SERVICE_DIR/scripts/update-rules.sh" ]; then
+        exec "$SERVICE_DIR/scripts/update-rules.sh"
+    else
+        die "update-rules.sh not found: $SERVICE_DIR/scripts/update-rules.sh"
+    fi
+}
+
+cmd_help() {
+    cat <<EOF
+SH Sing-box Linux eBPF — Unified Service Controller
+
+Usage: sbctl <command> [arguments]
+
+Service Management:
+  start                  Start sing-box service
+  stop                   Stop sing-box service
+  restart                Restart sing-box service
+  status                 Show service and runtime status
+  check                  Validate configuration file
+  config                 Show active config path and listeners (no credentials)
+  preflight              Validate config, local IPv4 listeners and upstream UIDs
+  check-xtunnel          Check actual upstream UIDs against eBPF selectors
+  import-config FILE     Validate, back up and import a config; no restart
+  logs [-f]              Inspect logs (journalctl or logread)
+
+Traffic Takeover & Filters:
+  filter show            Show current traffic takeover and filter rules
+  filter exclude-proc    Add process to direct bypass (e.g. sshd, dockerd)
+  filter remove-proc     Remove process from bypass
+  filter exclude-user    Add UID to exclusion list
+  filter remove-user     Remove UID from exclusion list
+  filter include-user    Set specific UID as sole proxied user
+  filter reset           Reset to full system takeover
+  gateway configure IFACE LAN_CIDR  Configure LAN TProxy gateway
+  gateway status          Show LAN gateway state
+  gateway disable         Remove LAN gateway configuration
+
+Diagnostics & Maintenance:
+  ebpf-status            Show eBPF kernel capability & map status
+  test-leak              Run DNS leak, WebRTC STUN & egress IP verification
+  update-core            Update reF1nd sing-box core binary
+  update-rules           Update DustinWin geodata rule-sets and providers
+  help                   Show this help message
+
+EOF
+}
+
+# -----------------------------------------------------------------------------
+# Dispatch
+# -----------------------------------------------------------------------------
+case "${1:-help}" in
+    check)        cmd_check ;;
+    config)       cmd_config ;;
+    preflight)    cmd_preflight ;;
+    check-xtunnel) check_files; check_xtunnel_exclusions ;;
+    import-config) shift; cmd_import_config "$@" ;;
+    start)        cmd_start ;;
+    stop)         cmd_stop ;;
+    restart)      cmd_restart ;;
+    status)       cmd_status ;;
+    logs)         shift; cmd_logs "$@" ;;
+    ebpf-status)  cmd_ebpf_status ;;
+    gateway)      shift; "$SERVICE_DIR/scripts/gateway.sh" "$@" ;;
+    filter)       shift; cmd_filter "$@" ;;
+    test-leak)    cmd_test_leak ;;
+    update-core)  shift; cmd_update_core "$@" ;;
+    update-rules) cmd_update_rules ;;
+    help|--help|-h) cmd_help ;;
+    *)
+        err "Unknown command: $1"
+        cmd_help
+        exit 2
+        ;;
+esac

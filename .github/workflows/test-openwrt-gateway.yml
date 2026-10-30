@@ -1,0 +1,207 @@
+name: OpenWrt installation and gateway
+
+on:
+  push:
+    branches: [main, openwrt]
+    paths:
+      - 'scripts/**'
+      - 'openwrt/**'
+      - 'config/**'
+      - 'providers/**'
+      - 'examples/**'
+      - README.md
+      - .gitignore
+      - menu.sh
+      - install.sh
+      - quick-install.sh
+      - uninstall.sh
+      - 'tests/**'
+      - 'tools/**'
+      - .github/workflows/test-openwrt-gateway.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shell syntax
+        run: |
+          bash -n scripts/gateway.sh
+          bash -n scripts/sbctl
+          sh -n tests/test_sbctl_ebpf_api.sh
+          bash -n tests/test_gateway_reconcile.sh
+          sh -n tests/test_procd_ubus.sh
+          sh -n openwrt/sing-box.init
+          sh -n menu.sh
+          sh -n scripts/runtime-paths.sh scripts/download.sh scripts/configure-download.sh
+          bash -n install.sh uninstall.sh
+          sh -n quick-install.sh
+          for script in scripts/*.sh tests/*.sh; do bash -n "$script"; done
+      - name: Validate reordered SSH menu handlers
+        run: python3 tests/test_menu_layout.py
+      - name: Verify procd benign service deletion and preserve real errors
+        run: sh tests/test_procd_ubus.sh
+      - name: Verify runtime config paths, fresh LAN bind checks and offline script deployment
+        run: |
+          if ! command -v jq >/dev/null 2>&1; then sudo apt-get update -qq && sudo apt-get install -y -qq jq; fi
+          sh tests/test_runtime_paths.sh
+          sh tests/test_menu_lan_config.sh
+          sh tests/test_sbctl_config_paths.sh
+          sh tests/test_sbctl_check_cache.sh
+          bash tests/test_scripts_only_update.sh
+      - name: Verify device portability and preserve user-defined private-network routing
+        run: |
+          bash tests/test_install_portability.sh
+          sh tests/test_procd_capabilities.sh
+          bash tests/test_core_update_portability.sh
+          bash tests/test_uninstall_ownership.sh
+          bash tests/test_sbctl_portability.sh
+          sh tests/test_device_helpers.sh
+          sh tests/test_pc_privacy_policy.sh
+      - name: Verify download modes, standalone public bootstrap and sanitized examples
+        run: |
+          bash tests/test_download_proxy.sh
+          bash tests/test_download_integration.sh
+          sh tests/test_public_bootstrap.sh
+          python3 tests/test_public_sanitization.py
+      - name: Check generic configurations with the verified pinned core
+        shell: bash
+        run: |
+          set -euo pipefail
+          core_version=$(sed -n 's/^DEFAULT_CORE_VERSION="\([^"]*\)"/\1/p' scripts/update-core.sh)
+          core_hash=$(sed -n 's/^HASH_amd64_glibc="\([^"]*\)"/\1/p' scripts/update-core.sh)
+          test -n "$core_version" && test "${#core_hash}" -eq 64
+          core_archive="$RUNNER_TEMP/public-config-core.tar.gz"
+          curl -q -fL --retry 2 --connect-timeout 15 --max-time 180 \
+            "https://github.com/reF1nd/sing-box-releases/releases/download/$core_version/sing-box-${core_version#v}-linux-amd64-glibc.tar.gz" \
+            -o "$core_archive"
+          printf '%s  %s\n' "$core_hash" "$core_archive" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/public-config-core"
+          tar -xzf "$core_archive" -C "$RUNNER_TEMP/public-config-core"
+          core_binary=$(find "$RUNNER_TEMP/public-config-core" -type f -name sing-box -print -quit)
+          test -n "$core_binary"
+          sudo env SB_TEST_CORE="$core_binary" bash tests/test_generic_config_core.sh
+      - name: eBPF runtime diagnostic should skip missing gRPC API (mock-only)
+        run: |
+          if ! command -v jq >/dev/null 2>&1; then sudo apt-get update -qq && sudo apt-get install -y -qq jq; fi
+          sh tests/test_sbctl_ebpf_api.sh
+      - name: Reconcile stale gateway rules and preserve foreign policy (mock-only)
+        run: |
+          if ! command -v jq >/dev/null 2>&1; then sudo apt-get update -qq && sudo apt-get install -y -qq jq; fi
+          sudo bash tests/test_gateway_reconcile.sh
+      - name: Fail safely on BusyBox ip before applying network rules
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp=$(mktemp -d)
+          mkdir -p "$tmp/bin"
+          cat > "$tmp/bin/ip" <<'SH'
+          #!/bin/sh
+          if [ "${1:-}" = "-V" ]; then echo 'BusyBox v1.36.0 (ip applet)'; exit 0; fi
+          echo 'Unexpected ip network mutation' >&2
+          exit 99
+          SH
+          cat > "$tmp/bin/nft" <<'SH'
+          #!/bin/sh
+          echo 'Unexpected nft network mutation' >&2
+          exit 99
+          SH
+          cat > "$tmp/bin/jq" <<'SH'
+          #!/bin/sh
+          echo 'Unexpected jq operation' >&2
+          exit 99
+          SH
+          chmod 755 "$tmp/bin/"*
+          if PATH="$tmp/bin:$PATH" bash scripts/gateway.sh requirements >"$tmp/out" 2>&1; then
+            echo 'BUG: BusyBox ip was accepted as iproute2' >&2
+            exit 1
+          fi
+          cat "$tmp/out"
+          grep -Fq 'ip-full' "$tmp/out"
+          grep -Fq 'No routing changes applied' "$tmp/out"
+      - name: Accept full iproute2 tool in read-only check
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp=$(mktemp -d)
+          mkdir -p "$tmp/bin"
+          printf '#!/bin/sh\nif [ "${1:-}" = "-V" ]; then echo "ip utility, iproute2-6.15.0"; exit 0; fi\nexit 99\n' > "$tmp/bin/ip"
+          printf '#!/bin/sh\nexit 99\n' > "$tmp/bin/nft"
+          printf '#!/bin/sh\nexit 99\n' > "$tmp/bin/jq"
+          chmod 755 "$tmp/bin/"*
+          PATH="$tmp/bin:$PATH" bash scripts/gateway.sh requirements
+      - name: Validate actual OpenWrt IPv4 TProxy ruleset with nft parser
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v nft >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq nftables
+          fi
+          # Render the exact table in scripts/gateway.sh (no duplicate rules
+          # maintained in CI), replacing its OpenWrt runtime placeholders.
+          awk '/^add table inet \$TABLE$/{emit=1} emit && /^EOF$/{exit} emit{print}' scripts/gateway.sh |
+            sed -e 's/\$TABLE/ci_singbox_one_arm/g' \
+                -e 's/\$IFACE/eth0/g' \
+                -e 's@\$LAN_CIDR@192.168.50.0/24@g' \
+                -e 's/\$PORT/1536/g' \
+                -e 's/\$MARK/0x1536/g' \
+            > "$RUNNER_TEMP/gateway.nft"
+          test "$(grep -c 'tproxy ip to :1536' "$RUNNER_TEMP/gateway.nft")" -eq 4
+          cat "$RUNNER_TEMP/gateway.nft"
+          sudo nft -c -f "$RUNNER_TEMP/gateway.nft"
+      - name: Load and remove the exact generated nftables table on CI runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          cleanup() { sudo nft delete table inet ci_singbox_one_arm 2>/dev/null || true; }
+          trap cleanup EXIT
+          sudo nft -f "$RUNNER_TEMP/gateway.nft"
+          sudo nft -a list table inet ci_singbox_one_arm
+          test "$(sudo nft list table inet ci_singbox_one_arm | grep -c 'tproxy ip to :1536')" -eq 4
+      - name: Real legacy-in-place migration loads nftables table
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/legacy.sh" <<'SCRIPT'
+          #!/bin/bash
+          set -eu
+          TABLE=ci_legacy_fixed
+          IFACE=ci-nonexistent
+          LAN_CIDR=192.168.50.0/24
+          PORT=1536
+          MARK=0x1536
+          nft -f - <<EOF
+          add table inet $TABLE
+          table inet $TABLE {
+              chain prerouting {
+                  type filter hook prerouting priority mangle; policy accept;
+                  iifname "$IFACE" ip saddr $LAN_CIDR meta l4proto { tcp, udp } th dport 53 tproxy ip to :$PORT meta mark set $MARK accept
+                  iifname "$IFACE" ip saddr $LAN_CIDR fib daddr type local return
+                  iifname "$IFACE" ip saddr $LAN_CIDR ip daddr $LAN_CIDR return
+                  iifname "$IFACE" ip saddr $LAN_CIDR meta l4proto { tcp, udp } tproxy ip to :$PORT meta mark set $MARK accept
+              }
+          }
+          EOF
+          SCRIPT
+          sed -i '/^[[:space:]]*nft -f - <<EOF$/,/^EOF$/{
+          /^add table inet \$TABLE$/d
+          s/^table inet \$TABLE {$/add table inet $TABLE/
+          s/^    chain prerouting {$/add chain inet $TABLE prerouting { type filter hook prerouting priority mangle; policy accept; }/
+          /^        type filter hook prerouting priority mangle; policy accept;$/d
+          s/^        iifname /add rule inet $TABLE prerouting iifname /
+          s/tproxy to :\$PORT/tproxy ip to :$PORT/g
+          /^    }$/d
+          /^}$/d
+          }' "$RUNNER_TEMP/legacy.sh"
+          bash -n "$RUNNER_TEMP/legacy.sh"
+          test "$(grep -c '^add table inet \$TABLE$' "$RUNNER_TEMP/legacy.sh")" -eq 1
+          test "$(grep -c '^add rule inet \$TABLE prerouting' "$RUNNER_TEMP/legacy.sh")" -eq 4
+          ! grep -q '^table inet \$TABLE {' "$RUNNER_TEMP/legacy.sh"
+          trap 'sudo nft delete table inet ci_legacy_fixed 2>/dev/null || true' EXIT
+          sudo bash "$RUNNER_TEMP/legacy.sh"
+          sudo nft list table inet ci_legacy_fixed
