@@ -1,0 +1,262 @@
+# OpenWrt sing-box eBPF
+
+面向 OpenWrt / iStoreOS 的 reF1nd sing-box 管理脚本，提供 SSH 菜单、procd 服务、本机 eBPF、LAN IPv4 TProxy、认证 HTTP/SOCKS5 入口及自定义目的路由。
+
+**公开仓库：** [fsyllkn/openwrt-singbox-ebpf](https://github.com/fsyllkn/openwrt-singbox-ebpf)，默认分支 `main`。在线安装、源码更新均使用本仓库，无需 GitHub Token，也不要求安装 Git。
+
+本仓库只包含通用配置和虚构示例。**没有可用订阅、真实代理节点或内置账号。** 首次安装后先填写自己的上游，再验证并启动；安装器不会覆盖设备已有的运行配置。
+
+## 1. 支持范围
+
+| 项目 | 支持与要求 |
+| --- | --- |
+| 系统 | OpenWrt / iStoreOS、procd、`opkg` 或 `apk` |
+| 自动下载核心 | Linux `x86_64/amd64`、`aarch64/arm64`，OpenWrt 使用 musl 版本 |
+| 本机透明代理 | reF1nd eBPF local；cgroup 数据平面需要固件实际支持 cgroup v2 / BPF |
+| LAN 网关 | nftables TProxy，接管选定 LAN 接口和源网段的 IPv4 TCP/UDP；需 `ip-full`、nft 及固件 TProxy 能力 |
+| 显式代理 | HTTP/SOCKS5 mixed 入站，可配置 LAN 地址和认证 |
+| 网络拓扑 | 单网口旁路由或独立 LAN/WAN；不要求接口名为 `br-lan`，不假定掩码为 `/24` |
+
+脚本不会自动更换接管模式来绕过固件限制。MIPS、32 位 ARM 等没有本项目已配置的安装包时会提前报错。LAN IPv4 TProxy 不等于已经接管客户端 IPv6；真实转发、DNS 和客户端行为仍需在设备上验证。
+
+## 2. 在线准备源码并打开菜单
+
+### 默认下载
+
+在 OpenWrt SSH 中执行：
+
+```sh
+wget -O /tmp/sb-openwrt.sh https://raw.githubusercontent.com/fsyllkn/openwrt-singbox-ebpf/main/quick-install.sh
+sh /tmp/sb-openwrt.sh
+```
+
+已有 curl 时也可使用：
+
+```sh
+curl -fL https://raw.githubusercontent.com/fsyllkn/openwrt-singbox-ebpf/main/quick-install.sh -o /tmp/sb-openwrt.sh
+sh /tmp/sb-openwrt.sh
+```
+
+引导脚本仅准备源码和注册 `sb` 快捷命令，随后打开菜单。菜单 **1** 才安装依赖、核心及服务；安装本身不启动透明代理。重复打开 `sb` 不会自动联网更新。
+
+源码默认放在 `/overlay/openwrt-singbox-ebpf`，没有 `/overlay` 时使用 `/root/openwrt-singbox-ebpf`。可用绝对路径环境变量 `SB_INSTALL_SOURCE_DIR` 指定其他目录，支持普通空格。
+
+### 通过本地或局域网 HTTP 代理
+
+首次下载脚本也必须经过代理时：
+
+```sh
+download_proxy='http://127.0.0.1:7890'
+http_proxy="$download_proxy" https_proxy="$download_proxy" \
+  curl -fL https://raw.githubusercontent.com/fsyllkn/openwrt-singbox-ebpf/main/quick-install.sh -o /tmp/sb-openwrt.sh
+SB_DOWNLOAD_MODE=http SB_HTTP_PROXY="$download_proxy" sh /tmp/sb-openwrt.sh
+```
+
+将地址改为当前设备可达的 HTTP 代理。上面的变量只用于本次命令及其子菜单；长期设置使用菜单 **24**。
+
+HTTPS 资源经过 HTTP 代理需要客户端支持 CONNECT。脚本优先使用 curl，也支持 GNU Wget；OpenWrt 的 BusyBox wget / uclient-fetch 不作为该模式的替代客户端。缺少 curl 时，先通过可用的软件源安装 curl，或使用下一种 GitHub 下载代理/离线方式准备项目。脚本不会因 HTTP 代理失败而回退直连。
+
+### 通过公开 GitHub 下载代理
+
+以下前缀仅为格式示例，可替换成你信任且可用的服务：
+
+```sh
+github_proxy='https://ghfast.top'
+wget -O /tmp/sb-openwrt.sh "$github_proxy/https://raw.githubusercontent.com/fsyllkn/openwrt-singbox-ebpf/main/quick-install.sh"
+SB_DOWNLOAD_MODE=github SB_GITHUB_PROXY="$github_proxy" sh /tmp/sb-openwrt.sh
+```
+
+已下载脚本时，可直接传参数：
+
+```sh
+sh /tmp/sb-openwrt.sh --http-proxy http://127.0.0.1:7890
+sh /tmp/sb-openwrt.sh --github-proxy https://ghfast.top/
+sh /tmp/sb-openwrt.sh --direct
+```
+
+一次选择一种下载方式。GitHub 下载前缀用于公开的 GitHub 源码和资源，代理服务能够看到这些资源请求；使用可信服务。订阅、运行流量和本地控制 API 不使用此下载前缀。
+
+### 离线安装源码
+
+上传本仓库 `main` 分支的 ZIP 或 TAR.GZ 后执行：
+
+```sh
+sh /tmp/sb-openwrt.sh --archive /tmp/openwrt-singbox-ebpf-main.zip
+```
+
+ZIP 需要 unzip，TAR.GZ 可直接使用 tar。也可从已上传的源码目录准备：
+
+```sh
+sh /path/to/source/quick-install.sh --source /path/to/source
+```
+
+离线准备和 `--scripts-only` 不要求下载代理可用。
+
+## 3. 统一下载代理设置
+
+运行 `sb`，选择 **24 设置安装/更新下载代理**。可选择默认下载、HTTP 代理、GitHub 下载代理前缀。输入 URL 不回显；保存到 UCI，配置文件权限为 `0600`。设置后，本菜单后续操作使用新设置。
+
+也可使用配置工具：
+
+```sh
+sh /opt/sing-box/scripts/configure-download.sh show
+sh /opt/sing-box/scripts/configure-download.sh set direct
+sh /opt/sing-box/scripts/configure-download.sh set http http://127.0.0.1:7890
+sh /opt/sing-box/scripts/configure-download.sh set github https://ghfast.top/
+sh /opt/sing-box/scripts/configure-download.sh clear
+```
+
+安装前工具位于源码的 `scripts/configure-download.sh`。含认证信息的代理优先通过菜单输入，或使用 `set http --stdin`，避免 URL 进入命令历史。状态显示会遮蔽认证信息。
+
+| 选择 | 适用范围 |
+| --- | --- |
+| 默认 `direct` | 不添加项目代理，保留标准系统 `http_proxy` / `https_proxy` 等环境设置 |
+| HTTP `http` | 项目下载；包管理器及 Git 更新仅在对应子进程中接收代理环境，不写入 sing-box 的代理流量配置 |
+| GitHub `github` | 为 `github.com`、`raw.githubusercontent.com`、`codeload.github.com` 的公开下载 URL 添加指定前缀 |
+
+GitHub 前缀不用于系统软件源、其他网站、本地 Clash API 或订阅地址。`api.github.com` 发布元数据仍走默认网络；固定默认核心不需要这项 API 查询，更新其他版本时需要 API 可达或选择 HTTP 代理。Git 工作树的 `git pull` 使用默认网络或 HTTP 代理；GitHub 下载前缀用于无 Git 的压缩包更新。
+
+优先级：命令行参数设置的本次环境覆盖 > `SB_DOWNLOAD_MODE` / `SB_HTTP_PROXY` / `SB_GITHUB_PROXY` > UCI > 默认方式。单独设置一个代理 URL 环境变量可推断对应模式；同时设置两个 URL 时应明确指定模式。
+
+UCI 项为 `sing-box.download.mode`、`sing-box.download.http_proxy`、`sing-box.download.github_proxy`。共享下载工具覆盖源码压缩包、核心压缩包、WebUI 和规则集，不再自动尝试隐藏的第三方下载代理。核心仍按对应版本验证 SHA256；下载失败保留已有完整文件并返回错误。curl 使用总时限；wget 可用 `timeout` 时有总时限，否则使用客户端请求超时。
+
+## 4. 第一次配置与启动
+
+1. 菜单 **1** 安装/修复核心服务。
+2. 菜单 **9** 编辑实际运行配置，填写自己的上游出站或 Provider。
+3. 需要 LAN 显式代理时，菜单 **16** 设置本机实际 LAN IPv4、端口和账号。
+4. 需要 LAN 透明网关时，菜单 **13** 选择接口与客户端源网段。
+5. 使用 X-Tunnel 时，先运行其核心，再用菜单 **21** 合并实际专用 UID 排除。
+6. 运行预检，通过后启动。
+
+```sh
+sbctl config
+sbctl preflight
+sbctl start
+sbctl status
+```
+
+`config/config.json` 与 `config/config.template.json` 是相同的公开起始配置：
+
+- `providers` 为空，不会请求假订阅。
+- `configure-your-proxy` 是待配置的 `127.0.0.1:1080` SOCKS 出站，请替换成实际节点，或确认该地址已经有可信 SOCKS 服务。
+- `proxy` 指向待配置出站，`ai` 初始跟随 `proxy`；两者没有隐式 `direct` 兜底。
+- mixed 和 Clash API 初始仅监听回环地址；LAN 入口通过菜单按实际设备设置。
+- 新模板不预置设备专属 UID。
+
+这些示例不是现成代理服务。填写节点后再启动，并在实际客户端上验证。安装或更新不会把公开起始配置覆盖到已有运行 JSON。
+
+## 5. 保留 LAN 入站与远端内网访问
+
+完整示例见 [examples/lan-private-routing.json](examples/lan-private-routing.json) 和 [填写说明](examples/README.md)。示例包含带认证的 LAN mixed 入站及“指定目的 IP/CIDR → 指定节点”路由，所有地址、账号均为文档占位内容。
+
+三类地址用途不同：
+
+| 设置 | 含义 |
+| --- | --- |
+| `inbounds[].listen` | 当前 OpenWrt 实际拥有的监听地址 |
+| `runtime/gateway.json` 的 `interface` / `source_cidr` | 从哪个接口接管哪些 LAN 客户端 |
+| `route.rules[].ip_cidr` + `outbound` | 把哪些目的地址交给指定节点访问 |
+
+例如，希望访问 `10.77.50.10:14432` 时经过能到达远端私网的 `remote-office` 节点，相关目的规则应在通用私网直连之前：
+
+```json
+[
+  { "ip_cidr": ["10.77.50.10/32", "10.88.60.0/24"], "outbound": "remote-office" },
+  { "ip_is_private": true, "outbound": "direct" }
+]
+```
+
+修改本地 LAN 时，不要把这些远端目的规则一起改成新 LAN 网段。网关、UID 和代理配置工具保留自定义入站选项、其他用户及明确目的路由；严格隐私合并也保留自定义规则的相对顺序。
+
+进入网关的私网 TCP/UDP 由 sing-box 路由决定出口，不再因目的地址属于 LAN 前缀而一律提前放行。路由器自身地址和保留地址仍作本地处理。若客户端直接通过同网段 ARP 访问目标，流量可能根本不经过 OpenWrt，此时需设置具体路由或使用显式 HTTP/SOCKS5 代理。远端节点必须能够访问目标服务。
+
+## 6. 文件路径与配置保护
+
+| 路径/设置 | 作用 |
+| --- | --- |
+| `/opt/sing-box` | 默认运行目录 |
+| `/opt/sing-box/config/config.json` | 默认实际运行配置 |
+| `/opt/sing-box/providers` | 设备上的个人 Provider 和下载缓存 |
+| `/opt/sing-box/runtime/source-dir` | 最近部署时记录的源码目录 |
+| `/opt/sing-box/runtime/gateway.json` | 此设备的 LAN 接口与客户端源网段 |
+| `sing-box.main.service_dir` / `config_file` | UCI 中持久设置的运行目录与配置路径 |
+| `SH_SINGBOX_HOME` / `SH_SINGBOX_CONFIG` | 显式命令环境覆盖，路径必须为绝对路径 |
+
+以 `sbctl config` 输出为准。源码配置与运行配置可以是不同文件；更新源码不会自动导入用户配置。要导入自己编辑的完整配置：
+
+```sh
+sbctl import-config /path/to/your-config.json
+sbctl preflight
+sbctl restart
+```
+
+导入先内核校验、备份，再替换；不自动重启。预检每次核对实际 IPv4 监听地址及上游 UID，不把语法缓存当成端口绑定成功。配置编辑工具保留配置符号链接。
+
+个人订阅、节点密码和下载后的 Provider 只存放在设备的运行目录。仓库的 `providers` 仅保留空模板和说明，其他缓存被 Git 忽略；不要把个人配置覆盖到公开仓库的起始配置后提交。
+
+## 7. 在线更新
+
+### SSH 菜单
+
+运行 `sb` → **2 更新公开仓库源码** → 离线文件路径处直接回车，即按当前代理设置下载公开 `main` 分支。也可填写已上传的 ZIP/TAR.GZ。
+
+更新源码后，在实际源码目录部署配套脚本：
+
+```sh
+cd /overlay/openwrt-singbox-ebpf
+bash install.sh --scripts-only
+sbctl config
+sbctl preflight
+sbctl restart
+```
+
+目录不同请替换 `cd` 路径。`--scripts-only` 会先检查并备份，再更新脚本、菜单、procd 文件及配套模板；保留运行 JSON、Provider、核心和网关设置，不联网、不自动重启。
+
+### 一次完成源码与脚本更新
+
+```sh
+cd /overlay/openwrt-singbox-ebpf
+SB_INSTALL_SOURCE_DIR="$PWD" sh ./quick-install.sh --update --no-menu &&
+bash ./install.sh --scripts-only
+```
+
+需要本次临时代理时，为引导命令添加 `--http-proxy URL` 或 `--github-proxy PREFIX`。Git 工作树不会被压缩包覆盖；使用菜单的干净工作树检查和 `git pull --ff-only` 流程。
+
+菜单 **12** 单独更新核心：先下载并验证版本校验值，用候选核心检查现有配置后才替换；正在运行时重启失败会恢复旧二进制并尝试恢复服务。
+
+## 8. 常用菜单和诊断
+
+| 选项 | 功能 |
+| --- | --- |
+| 1 / 2 | 安装修复 / 更新公开源码 |
+| 3 / 4 / 5 / 6 / 7 / 8 | 重启 / 日志 / 启动 / 停止 / 状态 / 配置校验 |
+| 9 / 10 | 编辑运行配置 / 迁移旧版 DNS、block、shared 设置 |
+| 11 / 12 | 更新规则集 / 核心 |
+| 13 / 14 / 15 | 设置 / 查看 / 关闭 LAN 透明网关 |
+| 16 / 17 | 配置 / 关闭 LAN HTTP/SOCKS5 入口 |
+| 18 / 19 | 应用严格隐私策略 / 主机与配置诊断 |
+| 20 / 21 / 22 | 检查 X-Tunnel Provider / 对齐实际 UID / eBPF 与路由诊断 |
+| 23 / 24 | 卸载服务保留配置 / 下载代理设置 |
+
+严格隐私模板使用 AI 独立 DNS、AAAA 空答复和 STUN/DTLS 拒绝策略。视频会议、语音和 WebRTC 功能可能受影响；这也不能控制没有经过网关的客户端流量。DNS 使用同一代理出站不等于解析服务位于该节点本机。需要节点所在内网 DNS 时，另行配置实际可达的解析服务。
+
+Clash API 默认 `127.0.0.1:9090`。可用 SSH 端口转发访问 WebUI；若向 LAN 开放 API，应配置自己的 secret 并限制来源。下载代理设置不改变 API 监听或认证。
+
+```sh
+sbctl config
+sbctl check-xtunnel
+sbctl gateway status
+sbctl ebpf-status
+logread -e sing-box
+```
+
+网关使用独立 nft 表 `singbox_one_arm`、fwmark `0x1536`、路由表 `53136` 和优先级 `15360`。这些是需要保持一致的内部资源标识；工具检查资源归属与冲突，不清空其他防火墙或策略路由。OpenWrt DNS guard 保留 netifd/dnsmasq 管理的 DNS 和 `/etc/resolv.conf`。
+
+## 9. 验证与发布内容
+
+GitHub Actions 覆盖 shell 语法、菜单、运行路径、配置保留、UID、网关、核心更新回滚、安装卸载、下载代理及独立引导流程；在 CI Linux 上解析并加载/移除实际生成的 nft 规则。公开配置还有结构化脱敏检查。
+
+下载代理和服务边界测试使用隔离的模拟工具，不修改测试主机的真实路由。CI 的 nft 验证和核心配置校验不等同于对某台 OpenWrt 的 BPF、客户端 DNS、IPv6或端到端转发验收。
+
+公开发布采用独立源码快照，不带入原私有仓库提交历史。运行配置、订阅缓存、备份和设备凭据不属于发布内容。
