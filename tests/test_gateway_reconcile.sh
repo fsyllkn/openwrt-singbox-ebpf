@@ -263,6 +263,12 @@ for rule in rules:
     prefix = rule.split(' ip daddr ', 1)[1].split(' counter return', 1)[0]
     networks = prefix.replace('{', '').replace('}', '').replace(',', ' ').split()
     assert not any(destination in ipaddress.ip_network(network) for network in networks), rule
+# Both limited and directed broadcasts must bypass TProxy before DNS hijack.
+assert any('ip daddr 255.255.255.255 counter return' in rule for rule in rules)
+bcast = [i for i, rule in enumerate(rules) if 'fib daddr type broadcast counter return' in rule]
+assert len(bcast) == 1
+first_dns = next(i for i, rule in enumerate(rules) if 'udp dport 53' in rule and 'tproxy' in rule)
+assert bcast[0] < first_dns
 assert any('fib daddr type local counter return' in rule for rule in rules)
 assert any('127.0.0.0/8' in rule and 'counter return' in rule for rule in rules)
 assert sum('tproxy ip to :1536' in rule for rule in rules) == 4
