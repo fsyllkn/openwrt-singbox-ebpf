@@ -79,6 +79,8 @@ prepare_case() {
     printf '{"test":"source runtime local must never be imported"}\n' > "$CASE_SOURCE/providers/local.json"
     for file in "$CASE_SOURCE"/scripts/*; do
         [ -f "$file" ] || continue
+        # Upgrade a version that did not yet ship the route manager.
+        [ "$(basename "$file")" != route-manager.sh ] || continue
         printf '#!/bin/sh\n# old installed %s\n' "$(basename "$file")" > "$CASE_HOME/scripts/$(basename "$file")"
     done
     printf '#!/bin/sh\n# existing menu\n' > "$CASE_HOME/scripts/menu.sh"
@@ -199,17 +201,17 @@ cmp "$CASE_DIR/before/sing-box.init" "$CASE_INIT" || fail 'incomplete source mod
 cmp "$CASE_DIR/before/external-config.json" "$CASE_CONFIG" || fail 'incomplete source modified external config'
 [ ! -e "$MUTATION_LOG" ] || fail 'incomplete source invoked network/core/service command'
 
-for missing_helper in download.sh configure-download.sh config-parts-lib.sh config-parts.sh; do
+for missing_helper in download.sh configure-download.sh config-parts-lib.sh config-parts.sh route-manager.sh; do
     prepare_case "missing-$missing_helper"
     rm "$CASE_SOURCE/scripts/$missing_helper"
     if bash "$TEST_DIR/runner.sh" > "$CASE_DIR/output.log" 2>&1; then
         fail "source missing $missing_helper was deployed"
     fi
-    grep -Fq "Incomplete source: missing scripts/$missing_helper" "$CASE_DIR/output.log" || fail 'missing download helper not identified'
-    diff -r "$CASE_DIR/before/installed" "$CASE_HOME" || fail 'missing download helper modified installation'
-    cmp "$CASE_DIR/before/sing-box.init" "$CASE_INIT" || fail 'missing download helper modified init'
-    cmp "$CASE_DIR/before/external-config.json" "$CASE_CONFIG" || fail 'missing download helper modified external config'
-    [ ! -e "$MUTATION_LOG" ] || fail 'missing download helper invoked network/core/service command'
+    grep -Fq "Incomplete source: missing scripts/$missing_helper" "$CASE_DIR/output.log" || fail 'missing required helper not identified'
+    diff -r "$CASE_DIR/before/installed" "$CASE_HOME" || fail 'missing required helper modified installation'
+    cmp "$CASE_DIR/before/sing-box.init" "$CASE_INIT" || fail 'missing required helper modified init'
+    cmp "$CASE_DIR/before/external-config.json" "$CASE_CONFIG" || fail 'missing required helper modified external config'
+    [ ! -e "$MUTATION_LOG" ] || fail 'missing required helper invoked network/core/service command'
 done
 
 # Offline repair accepts missing generated JSON when a reserved parts path
@@ -222,9 +224,13 @@ for shape in pending broken missing_output dangling_parts; do
     else
         mkdir "$parts_dir"
         printf '{"source":"keep pending user edit"}\n' > "$parts_dir/inbounds.json"
+        printf '{"route":{"rules":[{"ip_cidr":["10.77.90.0/24"],"action":"route","outbound":"custom-node"}]}}\n' > "$parts_dir/routing.json"
         printf 'invalid layout is repairable offline\n' > "$parts_dir/layout.json"
         cp -a "$parts_dir" "$CASE_DIR/before-parts"
     fi
+    mkdir "$parts_dir.backup.previous"
+    printf '{"route":{"rules":[]}}\n' > "$parts_dir.backup.previous/routing.json"
+    cp -a "$parts_dir.backup.previous" "$CASE_DIR/before-parts-backup"
     if [ "$shape" = missing_output ] || [ "$shape" = dangling_parts ]; then rm "$CASE_CONFIG"; fi
     SB_DOWNLOAD_MODE=invalid bash "$TEST_DIR/runner.sh" > "$CASE_DIR/output.log" 2>&1 || {
         cat "$CASE_DIR/output.log" >&2; fail 'offline repair rejected reserved parts with missing/broken generated output'
@@ -239,6 +245,9 @@ for shape in pending broken missing_output dangling_parts; do
     else
         diff -r "$CASE_DIR/before-parts" "$parts_dir" || fail 'offline repair changed a user fragment or layout marker'
     fi
+    diff -r "$CASE_DIR/before-parts-backup" "$parts_dir.backup.previous" || fail 'offline repair changed a previous user routing backup'
+    cmp "$CASE_SOURCE/scripts/route-manager.sh" "$CASE_HOME/scripts/route-manager.sh" || fail 'offline repair omitted route manager'
+    cmp "$CASE_DIR/before/installed/providers/xboard.json" "$CASE_HOME/providers/xboard.json" || fail 'offline repair changed existing runtime provider'
     [ ! -e "$CASE_HOME/providers/local.json" ] || fail 'offline repair initialized a dummy provider cache'
     [ ! -e "$MUTATION_LOG" ] || fail 'offline parts repair invoked network/core/service'
 done

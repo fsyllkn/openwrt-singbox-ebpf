@@ -274,7 +274,7 @@ check_xtunnel_exclusions() {
         ' "$CONFIG")" || { err "Cannot evaluate eBPF UID selectors for X-Tunnel PID $pid."; return 1; }
         if [ "$risk" = unsafe ]; then
             err "X-Tunnel PID $pid (UID $real) would be captured by local eBPF."
-            err "Align the actual dedicated UID using menu 21 or configure an explicit UID exclusion in $CONFIG."
+            err "Align the actual dedicated UID under Diagnostics and maintenance -> X-Tunnel UID alignment, or configure an explicit UID exclusion in the active inbounds source."
             return 1
         fi
     done
@@ -784,6 +784,13 @@ cmd_update_rules() {
     fi
 }
 
+cmd_routes() {
+    local routes_tool="$SERVICE_DIR/scripts/route-manager.sh"
+    [ -r "$routes_tool" ] || routes_tool="$(dirname "$SBCTL_FILE")/route-manager.sh"
+    [ -r "$routes_tool" ] || die "Routing manager is missing; deploy the complete updated scripts directory."
+    bash "$routes_tool" "$@"
+}
+
 cmd_help() {
     cat <<EOF
 SH Sing-box Linux eBPF — Unified Service Controller
@@ -816,6 +823,9 @@ Traffic Takeover & Filters:
   gateway configure IFACE LAN_CIDR  Configure LAN TProxy gateway
   gateway status          Show LAN gateway state
   gateway disable         Remove LAN gateway configuration
+  routes [list|groups]     Inspect custom routes and current outbound groups
+  routes menu             Open the custom-routing management submenu
+  routes add|edit|remove|move  Edit routing.json; use 'routes help' for arguments
 
 Diagnostics & Maintenance:
   ebpf-status            Show eBPF kernel capability & map status
@@ -846,6 +856,7 @@ case "${1:-help}" in
     logs)         shift; cmd_logs "$@" ;;
     ebpf-status)  cmd_ebpf_status ;;
     gateway)      shift; "$SERVICE_DIR/scripts/gateway.sh" "$@" ;;
+    routes)       shift; cmd_routes "$@" ;;
     filter)       shift; cmd_filter "$@" ;;
     test-leak)    cmd_test_leak ;;
     update-core)  shift; cmd_update_core "$@" ;;

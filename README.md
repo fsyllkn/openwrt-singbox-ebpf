@@ -37,7 +37,7 @@ curl -fL https://raw.githubusercontent.com/fsyllkn/openwrt-singbox-ebpf/main/qui
 sh /tmp/sb-openwrt.sh
 ```
 
-引导脚本仅准备源码和注册 `sb` 快捷命令，随后打开菜单。菜单 **1** 才安装依赖、核心及服务；安装本身不启动透明代理。重复打开 `sb` 不会自动联网更新。
+引导脚本仅准备源码和注册 `sb` 快捷命令，随后打开菜单。进入 **安装与更新 → 安装/修复核心服务** 才安装依赖、核心及服务；安装本身不启动透明代理。重复打开 `sb` 不会自动联网更新。
 
 源码默认放在 `/overlay/openwrt-singbox-ebpf`，没有 `/overlay` 时使用 `/root/openwrt-singbox-ebpf`。可用绝对路径环境变量 `SB_INSTALL_SOURCE_DIR` 指定其他目录，支持普通空格。
 
@@ -52,7 +52,7 @@ http_proxy="$download_proxy" https_proxy="$download_proxy" \
 SB_DOWNLOAD_MODE=http SB_HTTP_PROXY="$download_proxy" sh /tmp/sb-openwrt.sh
 ```
 
-将地址改为当前设备可达的 HTTP 代理。上面的变量只用于本次命令及其子菜单；长期设置使用菜单 **24**。
+将地址改为当前设备可达的 HTTP 代理。上面的变量只用于本次命令及其子菜单；长期设置使用 **安装与更新 → 设置下载代理**。
 
 HTTPS 资源经过 HTTP 代理需要客户端支持 CONNECT。脚本优先使用 curl，也支持 GNU Wget；OpenWrt 的 BusyBox wget / uclient-fetch 不作为该模式的替代客户端。缺少 curl 时，先通过可用的软件源安装 curl，或使用下一种 GitHub 下载代理/离线方式准备项目。脚本不会因 HTTP 代理失败而回退直连。
 
@@ -94,7 +94,7 @@ sh /path/to/source/quick-install.sh --source /path/to/source
 
 ## 3. 统一下载代理设置
 
-运行 `sb`，选择 **24 设置安装/更新下载代理**。可选择默认下载、HTTP 代理、GitHub 下载代理前缀。输入 URL 不回显；保存到 UCI，配置文件权限为 `0600`。设置后，本菜单后续操作使用新设置。
+运行 `sb`，选择 **安装与更新 → 设置下载代理**。可选择默认下载、HTTP 代理、GitHub 下载代理前缀。输入 URL 不回显；保存到 UCI，配置文件权限为 `0600`。设置后，本菜单后续操作使用新设置。
 
 也可使用配置工具：
 
@@ -126,7 +126,7 @@ UCI 项为 `sing-box.download.mode`、`sing-box.download.http_proxy`、`sing-box
 
 ### 先确认服务与面板可以启动
 
-菜单 **1** 安装/修复核心服务。没有现有运行配置时，安装器会准备用户配置分文件、生成完整运行 JSON，并初始化两份非空的本地 Provider，不需要先填写订阅 URL。安装仍不自动启动服务；在固件支持相应 eBPF 能力、安装资源齐全后，可以执行：
+选择 **安装与更新 → 安装/修复核心服务**。没有现有运行配置时，安装器会准备用户配置分文件、生成完整运行 JSON，并初始化两份非空的本地 Provider，不需要先填写订阅 URL。安装仍不自动启动服务；在固件支持相应 eBPF 能力、安装资源齐全后，可以执行：
 
 ```sh
 sbctl config
@@ -162,7 +162,7 @@ ssh -L 19090:127.0.0.1:9090 root@OPENWRT_IP
 
 ### 再填写真实节点或订阅
 
-手工节点/X-Tunnel：编辑运行目录中的 `providers/local.json`，或在 `config/config.d/providers.json` 中把 `local` Provider 的 `path` 改成实际导出路径。文件需至少包含一个核心支持的代理节点。菜单 **9** 可以选择要编辑的配置部分；已有单文件模式仍编辑完整 JSON。重新加载本地 Provider 或重启后，在面板的 `proxy` 组选择真实的 `local/<节点标签>`。
+手工节点/X-Tunnel：编辑运行目录中的 `providers/local.json`，或在 `config/config.d/providers.json` 中把 `local` Provider 的 `path` 改成实际导出路径。文件需至少包含一个核心支持的代理节点。**配置与隐私 → 编辑配置** 可以选择要编辑的配置部分；已有单文件模式仍编辑完整 JSON。重新加载本地 Provider 或重启后，在面板的 `proxy` 组选择真实的 `local/<节点标签>`。
 
 HTTP 订阅：参考 [HTTP 片段](examples/http-provider.sample.json)，将 `example.invalid` URL 换成自己的真实地址，再替换 `config/config.d/providers.json` 里同名的 `xboard` local Provider，保留另一个 `local` Provider；单文件模式在完整 JSON 中修改。这个片段不是完整配置，不能直接作为 `sbctl import-config` 的输入。默认示例使用 `User-Agent: clash.meta`，省略 `http_client.detour`，通过核心默认拨号器下载；如果订阅必须经过代理，再把 `detour` 设为已配置且可用的代理出站标签。不要指向尚未配置的占位节点，也不要将它设为没有拨号选项的 `direct` 出站。
 
@@ -170,11 +170,47 @@ HTTP 订阅：参考 [HTTP 片段](examples/http-provider.sample.json)，将 `ex
 
 固定核心启动时先建立 selector 静态成员，再加载 Provider。保留静态默认项，在面板选择动态 Provider 节点并由缓存保存；不要把 `xboard/<节点标签>` 直接填入初始 `outbounds` 或 `default`，以免产生启动期找不到节点的错误。字段与合并方法见 [Provider 说明](providers/README.md)。
 
-配置真实上游后，菜单 **16** 设置需要的 LAN 显式入口，菜单 **13** 设置需要的 LAN 透明网关；使用 X-Tunnel 时先启动其核心，再用菜单 **21** 对齐实际专用 UID 排除。最后预检、重启并在客户端验证。这些工具在分文件模式下会把修改写回 `inbounds.json`，后续生成配置时保留。安装或更新不会用公开起始配置或样例替换用户的节点、订阅缓存和自定义配置部分。
+配置真实上游后，在 **LAN 接入** 中设置需要的 HTTP/SOCKS5 入口或 LAN 透明网关；使用 X-Tunnel 时先启动其核心，再进入 **诊断与维护 → 对齐 X-Tunnel eBPF 进程 UID**。最后预检、重启并在客户端验证。这些工具在分文件模式下会把修改写回 `inbounds.json`，后续生成配置时保留。安装或更新不会用公开起始配置或样例替换用户的节点、订阅缓存和自定义配置部分。
 
 ## 5. 保留 LAN 入站与远端内网访问
 
 完整示例见 [examples/lan-private-routing.json](examples/lan-private-routing.json) 和 [填写说明](examples/README.md)。示例包含带认证的 LAN mixed 入站及“指定目的 IP/CIDR → 指定节点”路由，所有地址、账号均为文档占位内容。
+
+### 特色路由通过独立文件和菜单管理
+
+特色路由保存在 `/opt/sing-box/config/config.d/routing.json`；使用自定义运行配置路径时，以 `sbctl config` 显示的伴随目录为准。进入一级菜单 **2 特色路由**，可以查看、新增、修改、删除规则、调整优先级，以及查看可选出站分组。
+
+新增时填写目的 IP/网段、可选的客户端源 IP/网段和端口，再从实际 `outbounds.json` 中的分组选择目标。至少填写源或目的 IP 范围之一。单个 IPv4 会保存为 `/32`，不依赖本机 LAN 网段。`remote-office`、`remote-home` 是用户自定义的分组 `tag`，工具按名称引用它们，没有预置的办公室、家庭地址或固定分组名称。
+
+例如，下面是追加到现有 `outbounds` 数组中的一个分组对象，其中 `office-node` 须是已经配置的静态节点：
+
+```json
+{
+  "type": "selector",
+  "tag": "remote-office",
+  "outbounds": ["office-node"],
+  "default": "office-node"
+}
+```
+
+分组建立后会出现在特色路由的目标列表里。规则只记录 `outbound: "remote-office"`，由核心使用该分组当前选择的节点。换节点时可以调整分组；重命名或删除仍被引用的分组时，必须同步修改路由，否则预检会拒绝启动。Provider 节点的选择方式仍遵守前文的静态初始成员要求。
+
+保存规则时先组装并预检，通过后更新源文件和完整运行 JSON。需要让运行中的服务采用这些规则时，选择特色路由中的 **校验并重启应用**；启动、重启或重载服务时也会自动读取最新源文件。编辑期间如果规则或分组发生变化，旧提交会被拒绝，以免序号变化后误改另一条规则。
+
+也可以通过 SSH 管理。下列示例要求 `remote-office` 与 `remote-home` 已经存在：
+
+```sh
+sbctl routes groups
+sbctl routes list
+sbctl routes add --destination 10.77.50.10 --group remote-office --port 14432
+sbctl routes edit 1 --group remote-home
+sbctl routes list
+sbctl preflight && sbctl restart
+```
+
+规则序号从 1 开始；`sbctl routes move FROM TO` 调整顺序，`sbctl routes remove N` 删除指定规则，完整参数见 `sbctl routes help`。这些命令仅修改独立路由源文件，保留其他用户规则的条件和顺序，并通过配置生成器更新运行 JSON。旧单文件模式需要先在 **配置与隐私 → 配置分文件模式 / 迁移** 中显式无损拆分；管理工具不会自动替换旧 DNS 或路由策略。
+
+### 地址与规则的作用
 
 三类地址用途不同：
 
@@ -210,7 +246,7 @@ HTTP 订阅：参考 [HTTP 片段](examples/http-provider.sample.json)，将 `ex
 
 ### 日常编辑哪些文件
 
-默认运行目录为 `/opt/sing-box`。菜单 **9** 按部分编辑，先把草稿组装成完整配置并预检，通过后才提交源文件和运行 JSON；失败时保留原配置，并打印被拒绝草稿的保存位置。保存不自动重启。
+默认运行目录为 `/opt/sing-box`。**配置与隐私 → 编辑配置** 按部分编辑，先把草稿组装成完整配置并预检，通过后才提交源文件和运行 JSON；失败时保留原配置，并打印被拒绝草稿的保存位置。保存不自动重启。常用 IP/网段规则可直接使用 **特色路由** 菜单管理。
 
 | 用户配置文件 | 内容与格式 |
 | --- | --- |
@@ -236,7 +272,7 @@ HTTP 订阅：参考 [HTTP 片段](examples/http-provider.sample.json)，将 `ex
 
 ### 现有单文件配置如何迁移
 
-更新脚本后，已有 JSON 仍是单文件模式。菜单 **25** 可选择无损拆分，等价命令为：
+更新脚本后，已有 JSON 仍是单文件模式。**配置与隐私 → 配置分文件模式 / 迁移** 可选择无损拆分，等价命令为：
 
 ```sh
 sbctl split-config
@@ -247,7 +283,7 @@ sbctl restart
 
 迁移会比较现有 DNS、固定路由内容及规则顺序，仅在能完整保留配置含义时拆分；允许提取位于约定位置的 IP/进程例外。如果现有 DNS 或规则顺序不同，会明确拒绝，原配置与运行服务保持不变。不要为了通过迁移而直接用模板覆盖个人配置。
 
-生成后的完整 JSON 不作为日常编辑入口。直接改动它会触发保护，避免下一次生成时丢失手工修改。需要导入完整 JSON 时使用 `sbctl import-config FILE`，分文件模式会执行相同的兼容性检查。需要保留自由定制时，菜单 **25** 或 `sbctl single-config` 可保留有效完整 JSON、归档源目录并返回单文件模式；不自动重启。
+生成后的完整 JSON 不作为日常编辑入口。直接改动它会触发保护，避免下一次生成时丢失手工修改。需要导入完整 JSON 时使用 `sbctl import-config FILE`，分文件模式会执行相同的兼容性检查。需要保留自由定制时，使用 **配置与隐私 → 配置分文件模式 / 迁移** 或 `sbctl single-config`，可保留有效完整 JSON、归档源目录并返回单文件模式；不自动重启。
 
 通过 SSH 编辑源文件后，运行 `sbctl preflight` 组装并检查，再重启。也可以先在目录外编辑草稿，使用下面的命令校验后提交，避免把无效草稿写进当前源文件：
 
@@ -289,7 +325,7 @@ sbctl restart
 
 ### SSH 菜单
 
-运行 `sb` → **2 更新公开仓库源码** → 离线文件路径处直接回车，即按当前代理设置下载公开 `main` 分支。也可填写已上传的 ZIP/TAR.GZ。
+运行 `sb` → **安装与更新 → 更新公开仓库源码** → 离线文件路径处直接回车，即按当前代理设置下载公开 `main` 分支。也可填写已上传的 ZIP/TAR.GZ。
 
 更新源码后，在实际源码目录部署配套脚本：
 
@@ -313,22 +349,21 @@ bash ./install.sh --scripts-only
 
 需要本次临时代理时，为引导命令添加 `--http-proxy URL` 或 `--github-proxy PREFIX`。Git 工作树不会被压缩包覆盖；使用菜单的干净工作树检查和 `git pull --ff-only` 流程。
 
-菜单 **12** 单独更新核心：先下载并验证版本校验值，用候选核心检查现有配置后才替换；正在运行时重启失败会恢复旧二进制并尝试恢复服务。分文件模式先检查当前源文件与生成 JSON 是否一致；存在尚未应用的编辑、新模板策略或生成 JSON 缺失时，请先用当前核心执行 `sbctl preflight`，确认配置后再更新核心。候选核心验证期间也会检查源文件是否变化，避免校验一份配置却运行另一份。
+**安装与更新 → 更新 reF1nd 内核** 单独更新核心：先下载并验证版本校验值，用候选核心检查现有配置后才替换；正在运行时重启失败会恢复旧二进制并尝试恢复服务。分文件模式先检查当前源文件与生成 JSON 是否一致；存在尚未应用的编辑、新模板策略或生成 JSON 缺失时，请先用当前核心执行 `sbctl preflight`，确认配置后再更新核心。候选核心验证期间也会检查源文件是否变化，避免校验一份配置却运行另一份。
 
 ## 8. 常用菜单和诊断
 
-| 选项 | 功能 |
+| 一级菜单 | 二级功能 |
 | --- | --- |
-| 1 / 2 | 安装修复 / 更新公开源码 |
-| 3 / 4 / 5 / 6 / 7 / 8 | 重启 / 日志 / 启动 / 停止 / 状态 / 配置校验 |
-| 9 / 10 | 选择配置分片编辑（单文件模式编辑完整 JSON）/ 单文件旧格式迁移 |
-| 11 / 12 | 更新规则集 / 核心 |
-| 13 / 14 / 15 | 设置 / 查看 / 关闭 LAN 透明网关 |
-| 16 / 17 | 配置 / 关闭 LAN HTTP/SOCKS5 入口 |
-| 18 / 19 | 应用严格隐私策略 / 主机与配置诊断 |
-| 20 / 21 / 22 | 检查 X-Tunnel Provider / 对齐实际 UID / eBPF 与路由诊断 |
-| 23 / 24 | 卸载服务保留配置 / 下载代理设置 |
-| 25 | 无损拆分配置 / 归档分片并返回单文件模式 |
+| 1 服务管理 | 状态、启动、重启、停止、日志、配置校验 |
+| 2 特色路由 | 查看、新增、修改、删除、调整顺序、查看分组、校验并重启应用 |
+| 3 LAN 接入 | 透明网关设置/状态/关闭、HTTP/SOCKS5 入口设置/关闭 |
+| 4 配置与隐私 | 编辑配置、分文件模式迁移、旧格式迁移、隐私策略、泄漏检查 |
+| 5 安装与更新 | 安装修复、公开源码更新、下载代理、规则集更新、核心更新 |
+| 6 诊断与维护 | X-Tunnel 对接检查、UID 对齐、eBPF/路由诊断、卸载保留配置 |
+| 0 | 退出主菜单；在二级菜单中返回上一级 |
+
+执行操作后保留在当前分类，不用每次重新进入。确认提示统一显示 `[Y/n]`：**直接回车、输入 `y` 或 `yes` 都表示执行，`n` 表示取消**；输入中断或 EOF 会取消，不当作回车。停止、重启、删除和卸载保留配置等操作仍会先显示实际影响，再接受这一确认。
 
 严格隐私模板使用 AI 独立 DNS、AAAA 空答复和 STUN/DTLS 拒绝策略。视频会议、语音和 WebRTC 功能可能受影响；这也不能控制没有经过网关的客户端流量。DNS 使用同一代理出站不等于解析服务位于该节点本机。需要节点所在内网 DNS 时，另行配置实际可达的解析服务。
 
@@ -346,7 +381,7 @@ logread -e sing-box
 
 ## 9. 验证与发布内容
 
-GitHub Actions 覆盖 shell 语法、菜单、运行路径、配置保留、UID、网关、核心更新回滚、安装卸载、下载代理及独立引导流程；分文件测试覆盖无损迁移、配置图检查、事务回滚、缓存失效、菜单编辑和停止保护。在 CI Linux 上解析并加载/移除实际生成的 nft 规则，公开配置还有结构化脱敏检查。
+GitHub Actions 覆盖 shell 语法、分级菜单导航、回车确认、运行路径、配置保留、UID、网关、核心更新回滚、安装卸载、下载代理及独立引导流程；分文件与特色路由测试覆盖无损迁移、分组引用、增删改及排序、事务回滚、缓存失效、并发编辑和停止保护。在 CI Linux 上解析并加载/移除实际生成的 nft 规则，公开配置还有结构化脱敏检查。
 
 除了对完整 JSON 执行真实核心 `check`，CI 还使用同一固定核心验证分文件初始化、节点编辑、私网路由和丢失输出重建。另一个只有 loopback 的独立 network namespace 会真正启动核心：验证本地样例加载、selector 节点选择、HTTP 片段从本地模拟订阅获取节点及缓存重启。Provider 启动测试保留公开配置的 Provider/selector 结构，移除了与其无关的 eBPF、远程规则集和 WebUI 下载，不向虚拟订阅地址发请求。
 

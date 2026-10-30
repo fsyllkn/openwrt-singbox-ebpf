@@ -37,7 +37,7 @@ class ConfigPartsIntegration(unittest.TestCase):
                      self.home / "runtime", self.home / "providers", self.config.parent,
                      self.tools):
             path.mkdir(parents=True, exist_ok=True)
-        for name in ("sbctl", "runtime-paths.sh", "config-parts.sh", "config-parts-lib.sh"):
+        for name in ("sbctl", "runtime-paths.sh", "config-parts.sh", "config-parts-lib.sh", "route-manager.sh"):
             shutil.copyfile(ROOT / "scripts" / name, self.home / "scripts" / name)
         self.cli = self.home / "scripts" / "sbctl"
         # Select only the fixture's systemctl even if this test runs on OpenWrt.
@@ -220,6 +220,42 @@ fi
         drafts = list((self.home / "runtime").glob("settings.rejected.*.json"))
         self.assertEqual(len(drafts), 1)
         self.assertEqual(json.loads(drafts[0].read_text()), edited)
+        self.assertEqual(self.service_log.read_text(), "")
+
+    def test_routing_manager_binds_groups_and_repairs_a_missing_group_without_restart(self):
+        outbounds_path = self.parts / "outbounds.json"
+        outbounds = json.loads(outbounds_path.read_text())
+        for tag in ("remote-office", "remote-home"):
+            outbounds["outbounds"].append({"type": "selector", "tag": tag,
+                                           "outbounds": ["configure-your-proxy"],
+                                           "default": "configure-your-proxy"})
+        draft = self.work / "outbound-groups.json"
+        write_json(draft, outbounds)
+        self.run_cli("config-part", "outbounds", draft)
+        count = len(self.core_log.read_text().splitlines())
+        groups = self.run_cli("routes", "groups")
+        self.assertIn("remote-office", groups)
+        self.assertIn("remote-home", groups)
+        self.assertEqual(len(self.core_log.read_text().splitlines()), count)
+        self.run_cli("routes", "add", "--destination", "10.77.50.10", "--group", "remote-office")
+        routes = json.loads((self.parts / "routing.json").read_text())["route"]["rules"]
+        self.assertEqual(routes[0]["outbound"], "remote-office")
+        self.assertEqual(routes[0]["ip_cidr"], ["10.77.50.10/32"])
+        self.run_cli("routes", "edit", "1", "--group", "remote-home")
+        self.assertEqual(self.read_config()["route"]["rules"][3]["outbound"], "remote-home")
+        before = self.config.read_bytes()
+
+        # A user's separate outbound edit removes a referenced group. A restart
+        # must stop before service operations; the routing menu can still repair
+        # the reference because editing does not render the broken draft first.
+        outbounds["outbounds"] = [item for item in outbounds["outbounds"] if item["tag"] != "remote-home"]
+        write_json(outbounds_path, outbounds)
+        self.run_cli("restart", success=False)
+        self.assertEqual(self.config.read_bytes(), before)
+        self.assertEqual(self.service_log.read_text(), "")
+        self.run_cli("routes", "edit", "1", "--group", "remote-office")
+        self.run_cli("preflight")
+        self.assertEqual(self.read_config()["route"]["rules"][3]["outbound"], "remote-office")
         self.assertEqual(self.service_log.read_text(), "")
 
 

@@ -37,7 +37,7 @@ if jq -e '
   any(.outbounds[]?; .type == "dns" or .type == "block")
   or any(.route.rules[]?; .action == "sniff-override-destination")
 ' "$CONFIG" >/dev/null; then
-    die 'Legacy DNS/block/sniff rules exist. Run sb menu option 10 first.'
+    die 'Legacy DNS/block/sniff rules exist. Run sb → 配置与隐私 → 修复旧版 DNS/block 配置 first.'
 fi
 temp=$(mktemp "$(dirname "$CONFIG")/.privacy.XXXXXX") || die 'Cannot stage configuration'
 log=$(mktemp "$(dirname "$CONFIG")/.privacy-log.XXXXXX") || die 'Cannot stage check output'
@@ -109,5 +109,5 @@ mv -f "$temp" "$CONFIG" || die 'Cannot replace config'
 chmod 0600 "$CONFIG"
 rm -f "$ROOT/runtime/config.valid" 2>/dev/null || true
 info "Strict PC DNS/AI/WebRTC policy installed, backup: $backup"
-info 'No restart performed. Use sb menu 8 then 3 to restart during a maintenance window.'
+info 'No restart performed. Use sb → 服务管理 → 配置校验, then 重启 sing-box during a maintenance window.'
 info 'NOTE: LAN client IPv6 and external encrypted DNS are not fully controllable by IPv4 TProxy.'

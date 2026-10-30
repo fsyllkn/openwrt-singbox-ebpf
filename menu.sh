@@ -64,12 +64,12 @@ REPO_DIR=$(find_source_dir)
 
 say() { printf '%s\n' "$*"; }
 ask() {
-    printf '%s [y/N]: ' "$1"
+    printf '%s [Y/n]: ' "$1"
     IFS= read -r answer || return 1
-    case "$answer" in y|Y|yes|YES) return 0;; esac
+    case "$answer" in ''|y|Y|yes|YES) return 0;; esac
     return 1
 }
-wait_key() { printf '\nPress Enter to continue...'; IFS= read -r unused || true; }
+wait_key() { printf '\n按回车继续...'; IFS= read -r unused; }
 root_only() { [ "$(id -u)" -eq 0 ] || { say 'Requires root.'; return 1; }; }
 load_download_library() {
     download_library=$REPO_DIR/scripts/download.sh
@@ -84,7 +84,7 @@ run_sbctl() {
     if [ -f "$SBCTL" ]; then
         /bin/bash "$SBCTL" "$@"
     else
-        say 'sing-box has not been installed. Choose 1 first.'
+        say 'sing-box 尚未安装。请先进入「安装与更新 → 安装/修复核心服务」。'
         return 1
     fi
 }
@@ -128,7 +128,7 @@ edit_config() {
             return 1
         }
     fi
-    say 'Config saved. Run menu option 8 to validate before any restart.'
+    say '配置已保存。请先进入「服务管理 → 配置校验」，通过后再重启。'
 }
 edit_config_part() (
     parts_directory=$(sb_parts_dir)
@@ -173,7 +173,7 @@ edit_config_part() (
         fi
         exit 1
     fi
-    say '源文件和运行配置已更新；需要应用到服务时，选择菜单 3 重启。'
+    say '源文件和运行配置已更新；需要应用到服务时，进入「服务管理 → 重启 sing-box」。'
 )
 manage_config_parts() {
     root_only || return
@@ -321,7 +321,7 @@ configure_gateway() {
     [ -n "$cidr" ] || { say 'No subnet selected; gateway configuration unchanged.'; return 1; }
     ask "Configure gateway for $interface / $cidr? Does not enable it until restart." || return
     /bin/bash "$GATEWAY" configure "$interface" "$cidr" || return
-    say 'Next run option 8 (config check), then option 3 (restart) during a maintenance window.'
+    say '请先进入「服务管理 → 配置校验」，通过后在合适的维护时间选择「重启 sing-box」。'
 }
 disable_gateway() {
     root_only || return
@@ -397,7 +397,7 @@ source_update() {
         }
         load_download_library || return
         if [ "$SB_DOWNLOAD_MODE_RESOLVED" = github ]; then
-            say 'GitHub 下载前缀用于源码压缩包；当前目录是 Git 工作树，请在菜单 24 选择 HTTP 代理或默认下载后拉取。'
+            say 'GitHub 下载前缀用于源码压缩包；当前目录是 Git 工作树，请在「安装与更新 → 设置下载代理」选择 HTTP 代理或默认下载后拉取。'
             return 1
         fi
         ask "从当前远程拉取 $branch 分支？不会自动重启服务。" || return
@@ -415,7 +415,7 @@ source_update() {
     fi
     say "源码更新完成：$REPO_DIR"
     say "仅部署脚本到 $SB_HOME：在该源码目录执行 bash install.sh --scripts-only。"
-    say '菜单 1 是完整安装流程，可能更新运行中的内核。'
+    say '「安装与更新 → 安装/修复核心服务」是完整安装流程，可能更新运行中的内核。'
     say '仅更新源码不会重启 sing-box。'
 }
 configure_download_proxy() {
@@ -462,7 +462,7 @@ migrate_config() {
     script="$REPO_DIR/scripts/migrate-config.sh"
     [ -f "$script" ] || script="$SB_HOME/scripts/migrate-config.sh"
     [ -f "$script" ] || {
-        say '找不到迁移脚本。先通过选项 2 更新公开仓库源码。'
+        say '找不到迁移脚本。请先进入「安装与更新 → 更新公开仓库源码」。'
         return 1
     }
     [ -f "$CONFIG" ] || { say '现有 sing-box 配置不存在。'; return 1; }
@@ -551,8 +551,35 @@ align_xtunnel_ebpf() {
     ask '自动对齐 eBPF exclude_uid 和已运行的 X-Tunnel UID？' || return
     /bin/bash "$script"
 }
-# Menu labels are padded by terminal cell width (CJK=2), not byte count.
-# Keep the second label at cell 33; do not format two columns with printf %-Ns.
+manage_routes() {
+    route_tool=$SB_HOME/scripts/route-manager.sh
+    [ -f "$route_tool" ] || route_tool=$REPO_DIR/scripts/route-manager.sh
+    [ -f "$route_tool" ] || {
+        say '未找到特色路由管理工具。请先更新源码并部署配套脚本。'
+        return 1
+    }
+    [ -x /bin/bash ] || {
+        say '特色路由工具需要 Bash。请先进入「安装与更新 → 安装/修复核心服务」。'
+        return 1
+    }
+    /bin/bash "$route_tool" menu
+}
+
+uninstall_service() {
+    root_only || return
+    say '卸载会停止 sing-box 并移除本项目服务；保留配置、Provider 和 X-Tunnel。'
+    ask '卸载 sing-box 服务并保留现有配置？' || return
+    if [ -f "$SB_HOME/uninstall.sh" ]; then
+        /bin/bash "$SB_HOME/uninstall.sh"
+    elif [ -f "$REPO_DIR/uninstall.sh" ]; then
+        /bin/bash "$REPO_DIR/uninstall.sh"
+    else
+        say 'Uninstaller missing.'
+        return 1
+    fi
+}
+
+# One entry per row stays readable in narrow SSH terminals with CJK text.
 show_menu() {
     printf '\n==============================================\n'
     say ' reF1nd sing-box / OpenWrt SSH 管理菜单'
@@ -560,73 +587,123 @@ show_menu() {
         "$(service_status)" "$(gateway_status)" "$(package_manager)"
     printf ' 配置文件: %s\n' "$CONFIG"
     say '----------------------------------------------'
-    say '  【安装与常用】'
-    say '   1) 安装/修复核心服务           2) 更新公开仓库源码'
-    say '   3) 重启 sing-box               4) 查看服务日志'
-    say '   5) 启动 sing-box               6) 停止 sing-box'
-    say '   7) 查看服务状态                8) 配置语法检查'
-    say '  【配置与更新】'
-    say '   9) 编辑 sing-box 配置         10) 修复旧版 DNS/block 配置'
-    say '  11) 更新规则集                 12) 更新 reF1nd 内核'
-    say '  【LAN 透明网关】'
-    say '  13) 设置 LAN 透明网关          14) 查看网关状态'
-    say '  15) 关闭 LAN 网关'
-    say '  【PC 代理与隐私】'
-    say '  16) 配置 PC 的 LAN HTTP/SOCKS5 代理'
-    say '  17) 关闭 PC 的 LAN 代理入口'
-    say '  18) 应用 PC 严格隐私策略（需校验）'
-    say '  19) PC DNS/WebRTC/IPv6 防泄漏检查'
-    say '  【X-Tunnel / eBPF 诊断】'
-    say '  20) 检查 X-Tunnel 对接         21) 对齐 X-Tunnel eBPF 进程 UID'
-    say '  22) eBPF/路由诊断'
-    say '  【维护】'
-    say '  23) 卸载服务（保留配置）'
-    say '  24) 设置安装/更新下载代理'
-    say '  25) 配置分文件模式 / 迁移'
+    say '   1) 服务管理'
+    say '   2) 特色路由'
+    say '   3) LAN 接入'
+    say '   4) 配置与隐私'
+    say '   5) 安装与更新'
+    say '   6) 诊断与维护'
     say '   0) 退出'
+    say ' 确认提示 [Y/n]：回车或 y 确认，n 或其他输入取消。'
 }
+
+show_submenu() {
+    printf '\n----------------------------------------------\n'
+    case "$1" in
+        service)
+            say ' 【服务管理】'
+            say '   1) 查看服务状态'
+            say '   2) 启动 sing-box'
+            say '   3) 重启 sing-box'
+            say '   4) 停止 sing-box'
+            say '   5) 查看服务日志'
+            say '   6) 配置校验'
+            ;;
+        lan)
+            say ' 【LAN 接入】'
+            say '   1) 设置 LAN 透明网关'
+            say '   2) 查看网关状态'
+            say '   3) 关闭 LAN 透明网关'
+            say '   4) 配置 LAN HTTP/SOCKS5 代理'
+            say '   5) 关闭 LAN HTTP/SOCKS5 入口'
+            ;;
+        config)
+            say ' 【配置与隐私】'
+            say '   1) 编辑配置'
+            say '   2) 配置分文件模式 / 迁移'
+            say '   3) 修复旧版 DNS/block 配置'
+            say '   4) 应用 PC 严格隐私策略'
+            say '   5) DNS/WebRTC/IPv6 防泄漏检查'
+            ;;
+        install)
+            say ' 【安装与更新】'
+            say '   1) 安装/修复核心服务'
+            say '   2) 更新公开仓库源码'
+            say '   3) 设置下载代理'
+            say '   4) 更新规则集'
+            say '   5) 更新 reF1nd 内核'
+            ;;
+        diagnostics)
+            say ' 【诊断与维护】'
+            say '   1) 检查 X-Tunnel 对接'
+            say '   2) 对齐 X-Tunnel eBPF 进程 UID'
+            say '   3) eBPF/路由诊断'
+            say '   4) 卸载服务（保留配置）'
+            ;;
+    esac
+    say '   0) 返回主菜单'
+    say '   q) 退出'
+}
+
+# A single iterative dispatcher keeps actions in the selected category.
+# Return 2 means EOF or an explicit quit, so the main loop exits as well.
+run_submenu() {
+    submenu_section=$1
+    while :; do
+        show_submenu "$submenu_section"
+        printf '\n请选择：'
+        IFS= read -r submenu_choice || return 2
+        case "$submenu_choice" in
+            0) return 0 ;;
+            q|Q) return 2 ;;
+        esac
+        case "$submenu_section:$submenu_choice" in
+            service:1) run_sbctl status ;;
+            service:2) root_only && preflight_xtunnel && run_sbctl start ;;
+            service:3) root_only && ask 'Restart sing-box? Proxy connections will briefly disconnect.' &&
+                preflight_xtunnel && run_sbctl restart ;;
+            service:4) root_only && ask 'Stop sing-box and remove gateway rules?' && run_sbctl stop ;;
+            service:5) run_sbctl logs ;;
+            service:6) run_sbctl check ;;
+            lan:1) configure_gateway ;;
+            lan:2) [ -f "$GATEWAY" ] && /bin/bash "$GATEWAY" status || say 'Gateway script not installed.' ;;
+            lan:3) disable_gateway ;;
+            lan:4) configure_pc_proxy ;;
+            lan:5) disable_pc_proxy ;;
+            config:1) edit_config ;;
+            config:2) manage_config_parts ;;
+            config:3) migrate_config ;;
+            config:4) apply_pc_privacy ;;
+            config:5) privacy_audit ;;
+            install:1) install_core ;;
+            install:2) source_update ;;
+            install:3) configure_download_proxy ;;
+            install:4) root_only && run_sbctl update-rules ;;
+            install:5) root_only && ask 'Update sing-box core? Running service may restart.' && run_sbctl update-core ;;
+            diagnostics:1) inspect_xtunnel ;;
+            diagnostics:2) align_xtunnel_ebpf ;;
+            diagnostics:3) diagnose; run_sbctl ebpf-status 2>/dev/null || true ;;
+            diagnostics:4) uninstall_service ;;
+            *) say '无效选项，请使用当前菜单中的编号。'; continue ;;
+        esac
+        wait_key || return 2
+    done
+}
+
 while :; do
     show_menu
-    printf '\nChoose an option: '
+    printf '\n请选择分类：'
     IFS= read -r choice || break
+    menu_status=0
     case "$choice" in
-        1) install_core ;;
-        2) source_update ;;
-        3) root_only && ask 'Restart sing-box? Proxy connections will briefly disconnect.' &&
-            preflight_xtunnel && run_sbctl restart ;;
-        4) run_sbctl logs ;;
-        5) root_only && preflight_xtunnel && run_sbctl start ;;
-        6) root_only && ask 'Stop sing-box and remove gateway rules?' && run_sbctl stop ;;
-        7) run_sbctl status ;;
-        8) run_sbctl check ;;
-        9) edit_config ;;
-        10) migrate_config ;;
-        11) root_only && run_sbctl update-rules ;;
-        12) root_only && ask 'Update sing-box core? Running service may restart.' && run_sbctl update-core ;;
-        13) configure_gateway ;;
-        14) [ -f "$GATEWAY" ] && /bin/bash "$GATEWAY" status || say 'Gateway script not installed.' ;;
-        15) disable_gateway ;;
-        16) configure_pc_proxy ;;
-        17) disable_pc_proxy ;;
-        18) apply_pc_privacy ;;
-        19) privacy_audit ;;
-        20) inspect_xtunnel ;;
-        21) align_xtunnel_ebpf ;;
-        22) diagnose; run_sbctl ebpf-status 2>/dev/null || true ;;
-        23)
-            if root_only && ask 'Uninstall sing-box services, leaving configuration and X-Tunnel untouched?'; then
-                if [ -f "$SB_HOME/uninstall.sh" ]; then
-                    /bin/bash "$SB_HOME/uninstall.sh"
-                elif [ -f "$REPO_DIR/uninstall.sh" ]; then
-                    /bin/bash "$REPO_DIR/uninstall.sh"
-                else
-                    say 'Uninstaller missing.'
-                fi
-            fi ;;
-        24) configure_download_proxy ;;
-        25) manage_config_parts ;;
+        1) run_submenu service || menu_status=$? ;;
+        2) manage_routes || menu_status=$? ;;
+        3) run_submenu lan || menu_status=$? ;;
+        4) run_submenu config || menu_status=$? ;;
+        5) run_submenu install || menu_status=$? ;;
+        6) run_submenu diagnostics || menu_status=$? ;;
         0|q|Q) break ;;
-        *) say 'Unknown option.' ;;
+        *) say '无效分类，请使用主菜单中的编号。' ;;
     esac
-    wait_key
+    [ "$menu_status" -ne 2 ] || break
 done

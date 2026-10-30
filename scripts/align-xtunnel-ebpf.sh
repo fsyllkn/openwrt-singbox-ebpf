@@ -90,4 +90,4 @@ fi
 rm -f "$ROOT/runtime/config.valid" 2>/dev/null || true
 info "Config validated and updated; backup: $backup"
 info "Excluded X-Tunnel UIDs: $uid_json"
-info 'No restart performed. Run sb menu option 8 and start/restart when ready.'
+info 'No restart performed. Use sb → 服务管理 → 配置校验, then 重启 sing-box when ready.'

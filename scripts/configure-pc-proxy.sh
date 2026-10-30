@@ -151,5 +151,5 @@ else
 fi
 rm -f "$HOME_DIR/runtime/config.valid" 2>/dev/null || true
 info "Validated and saved; backup: $backup"
-info 'Restart sing-box manually using sb menu option 3 when ready.'
+info 'Restart sing-box manually using sb → 服务管理 → 重启 sing-box when ready.'
 info 'For SOCKS5, enable remote DNS (SOCKS5h); manual proxy does not capture the PC system DNS/IPv6.'

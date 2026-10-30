@@ -300,7 +300,7 @@ from fsyllkn/openwrt-singbox-ebpf. No Git required.
 --direct: no project proxy override; standard system proxy environment remains.
 --http-proxy: use a local/network HTTP proxy for this invocation and menu.
 --github-proxy: prefix public GitHub download URLs for this invocation and menu.
-Permanent download settings are available in menu option 24.
+Permanent download settings are available in sb → 安装与更新 → 设置下载代理.
 EOF
 }
 [ "$(id -u)" -eq 0 ] || error 'Run as root.'
@@ -385,6 +385,7 @@ validate_source() {
     [ -f "$1/scripts/configure-download.sh" ] &&
     [ -f "$1/scripts/config-parts-lib.sh" ] &&
     [ -f "$1/scripts/config-parts.sh" ] &&
+    [ -f "$1/scripts/route-manager.sh" ] &&
     [ -f "$1/scripts/gateway.sh" ] &&
     [ -f "$1/scripts/dns-guard.sh" ] &&
     [ -f "$1/scripts/update-core.sh" ] &&

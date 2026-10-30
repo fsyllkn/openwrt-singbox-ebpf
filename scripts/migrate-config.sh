@@ -89,4 +89,4 @@ chmod 0600 "$CONFIG"
 rm -f "$ROOT/runtime/config.valid" 2>/dev/null || true
 info 'Legacy DNS/block outbounds removed and hijack/sniff rules migrated.'
 info "Kernel check passed; backup: $BACKUP"
-info 'Service was not restarted. Use sb menu option 8 to check and option 3 to restart when ready.'
+info 'Service was not restarted. Use sb → 服务管理 → 配置校验, then 重启 sing-box when ready.'

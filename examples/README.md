@@ -16,11 +16,15 @@
 
 这些文件是原生 JSON 片段，不是独立的完整运行配置。例如 `inbounds.json` 顶层只有 `{"inbounds": [...]}`，`routing.json` 顶层只有 `{"route": {"rules": [...]}}`。DNS、固定路由和规则集由安装目录的 `config/config.template.json` 维护；不要把 `dns`、`route` 或其他分片数组放进 `settings.json` 试图覆盖它们。
 
-通过 `sb` 菜单 **9** 编辑对应分片，再运行 `sbctl preflight` 和 `sbctl restart`。LAN、网关和 UID 工具会回写 `inbounds.json`，重新生成后设置仍然保留。隐私策略操作在此模式下刷新固定策略，不重写用户分片；`layout.json` 由工具维护。
+通过 `sb` 的 **配置与隐私 → 编辑配置** 编辑对应分片，再运行 `sbctl preflight` 和 `sbctl restart`。LAN、网关和 UID 工具会回写 `inbounds.json`，重新生成后设置仍然保留。隐私策略操作在此模式下刷新固定策略，不重写用户分片；`layout.json` 由工具维护。
 
 已有单文件安装仍按原配置工作，可用 `sbctl split-config` 显式迁移。只有 DNS、固定路由和规则顺序兼容且能无损重组时才会切换；自定义解析器或复杂规则不兼容时，工具保留原配置。需要继续自定义 DNS 时可保留单文件模式；已启用分片的配置可用 `sbctl single-config` 显式切回。不要直接编辑生成 JSON 或通过删除分片目录绕过一致性检查。
 
 ### 指定私网目的地址经过指定出站
+
+一级菜单 **特色路由** 可直接维护独立 `routing.json`，支持新增、修改、删除、调整顺序和查看当前出站分组。目标列表实时读取 `outbounds.json` 中的分组 `tag`，支持 `remote-office`、`remote-home` 或其他自定义名字。保存时校验引用；服务启动、重启或重载前自动组合，核心按该分组选择的实际节点转发。保存后可在特色路由菜单选择 **校验并重启应用**。
+
+只读命令为 `sbctl routes list` 和 `sbctl routes groups`；例如 `sbctl routes add --destination 10.77.50.10 --group remote-office --port 14432` 会把单个 IPv4 转成 `/32`。`edit N` 修改指定规则，`remove N` 删除，`move FROM TO` 调整优先级；序号从 1 开始。菜单与命令只修改相应路由，不清空其他规则或重建出站节点。分组更名时要同步修改引用；无效引用可直接在路由管理中修复，不需要先启动坏配置。
 
 在 `outbounds.json` 定义自己的静态 `remote-office` 出站，然后把以下内容写入设备上的 `routing.json`。地址均为虚构示例，需替换为实际目标：
 

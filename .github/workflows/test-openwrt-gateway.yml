@@ -56,6 +56,7 @@ jobs:
           test -f "$archive_root/examples/local.sample.json"
           test -f "$archive_root/scripts/config-parts.sh"
           test -f "$archive_root/scripts/config-parts-lib.sh"
+          test -f "$archive_root/scripts/route-manager.sh"
           test -f "$archive_root/examples/config-routing.sample.json"
           echo 'Anonymous public bootstrap and source archive match this checkout.'
           # Also verify the floating entry points used by the SSH instructions,
@@ -89,8 +90,10 @@ jobs:
           bash -n install.sh uninstall.sh
           sh -n quick-install.sh
           for script in scripts/*.sh tests/*.sh; do bash -n "$script"; done
-      - name: Validate reordered SSH menu handlers
-        run: python3 tests/test_menu_layout.py
+      - name: Validate hierarchical SSH menus and Enter-to-confirm behavior
+        run: |
+          python3 tests/test_menu_layout.py
+          sh tests/test_menu_navigation.sh
       - name: Verify procd benign service deletion and preserve real errors
         run: sh tests/test_procd_ubus.sh
       - name: Verify runtime config paths, fresh LAN bind checks and offline script deployment
@@ -113,6 +116,7 @@ jobs:
       - name: Verify split configuration transactions and controller/menu integration
         run: |
           bash tests/test_config_parts.sh
+          bash tests/test_route_manager.sh
           python3 tests/test_config_parts_integration.py
       - name: Verify download modes, standalone public bootstrap and sanitized examples
         run: |
