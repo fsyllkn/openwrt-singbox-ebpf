@@ -471,4 +471,192 @@ for unsafe_target in "$CONTROL_TARGET" "$TEST_DIR/control-source-alias" "$TEST_D
     fi
     cmp "$TEST_DIR/launcher-before" "$TEST_DIR/sb-launcher" || fail 'rejected target modified launcher'
 done
+# Run the complete installer with its real updater, controller, composer and
+# shared helpers. Only network/package/service boundaries and the core binary
+# are fixtures; all system destinations are redirected into this test tree.
+# This checks a new runtime and a first installation with pre-existing JSON,
+# neither of which may require a host timeout/BusyBox applet.
+python3 - "$BASE" "$TEST_DIR" <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tarfile
+
+base = Path(sys.argv[1])
+work = Path(sys.argv[2]) / "installer-without-timeout"
+work.mkdir()
+tools = work / "tools"
+tools.mkdir()
+real_bash = shutil.which("bash")
+real_sha = shutil.which("sha256sum")
+assert real_bash and real_sha
+for name in ("awk", "basename", "bash", "cat", "chmod", "cmp", "cp", "date",
+             "dirname", "find", "grep", "gzip", "head", "jq", "ln", "mkdir",
+             "mktemp", "mv", "readlink", "rm", "rmdir", "sed", "sh", "sleep",
+             "tar", "touch", "tr", "wc"):
+    target = shutil.which(name)
+    assert target, f"Missing test prerequisite: {name}"
+    (tools / name).symlink_to(target)
+
+def script(path, text):
+    path.write_text(text)
+    path.chmod(0o755)
+
+archive_source = work / "archive"
+archive_source.mkdir()
+script(archive_source / "sing-box", """#!/bin/sh
+case "$1" in
+    version) printf 'core:version\\n' >> "$INSTALL_TEST_EVENTS"; echo 'sing-box version install-fixture' ;;
+    check)
+        printf 'core:check:%s\\n' "$3" >> "$INSTALL_TEST_EVENTS"
+        [ "$2" = -c ] && [ -f "$3" ] || exit 81
+        jq -e 'type == "object" and (.inbounds | type == "array")' "$3" >/dev/null ;;
+    *) exit 82 ;;
+esac
+""")
+archive = work / "core.tar.gz"
+with tarfile.open(archive, "w:gz") as bundle:
+    bundle.add(archive_source / "sing-box", arcname="sing-box")
+archive_digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+script(tools / "sha256sum", """#!/bin/sh
+output=$("$INSTALL_TEST_REAL_SHA" "$@") || exit "$?"
+case "$output" in
+    "$INSTALL_TEST_ARCHIVE_DIGEST "*) printf '7179981f14c225e3e872ac60af2086d6d719b4ddfd901c115c86cd9e4581f4fb  -\\n' ;;
+    *) printf '%s\\n' "$output" ;;
+esac
+""")
+script(tools / "id", '#!/bin/sh\n[ "$*" = -u ] || exit 83\necho 0\n')
+script(tools / "uname", """#!/bin/sh
+case "$*" in -m) echo x86_64 ;; -r) echo 6.6-install-fixture ;; *) exit 83 ;; esac
+""")
+script(tools / "pidof", "#!/bin/sh\nexit 1\n")
+script(tools / "opkg", """#!/bin/sh
+[ "$*" = update ] || exit 84
+printf 'package:update\\n' >> "$INSTALL_TEST_EVENTS"
+""")
+script(tools / "curl", """#!/bin/sh
+destination=
+url=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -o|--output) destination=$2; shift 2 ;;
+        https://*|http://*) url=$1; shift ;;
+        *) shift ;;
+    esac
+done
+case "$url" in
+    https://github.com/reF1nd/sing-box-releases/releases/download/*)
+        [ -n "$destination" ] || exit 85
+        cp "$INSTALL_TEST_ARCHIVE" "$destination"
+        printf 'download:core\\n' >> "$INSTALL_TEST_EVENTS" ;;
+    https://github.com/zephyruso/zashboard/*|https://github.com/DustinWin/ruleset_geodata/*)
+        [ -n "$destination" ] || exit 85
+        printf 'resource-fixture\\n' > "$destination" ;;
+    http://127.0.0.1:*) exit 7 ;;
+    *) printf 'Unexpected test download: %s\\n' "$url" >&2; exit 85 ;;
+esac
+""")
+script(tools / "unzip", """#!/bin/sh
+destination=
+while [ "$#" -gt 0 ]; do
+    case "$1" in -d) destination=$2; shift 2 ;; *) shift ;; esac
+done
+[ -n "$destination" ] || exit 86
+mkdir -p "$destination/dist"
+printf '<html>fixture</html>\\n' > "$destination/dist/index.html"
+""")
+for scenario in ("fresh", "preexisting-json"):
+    root = work / scenario
+    source = root / "source"
+    home = root / "service-home"
+    system = root / "system"
+    events = root / "events"
+    source.mkdir(parents=True)
+    for directory in ("scripts", "config", "examples", "providers", "openwrt", "systemd"):
+        shutil.copytree(base / directory, source / directory)
+    for name in ("install.sh", "menu.sh", "uninstall.sh"):
+        shutil.copyfile(base / name, source / name)
+    for directory in ("init.d", "config", "bin", "local-bin"):
+        (system / directory).mkdir(parents=True)
+    (system / "openwrt_release").write_text("fixture\n")
+    replacements = {
+        "/etc/openwrt_release": str(system / "openwrt_release"),
+        "/etc/init.d/sing-box": str(system / "init.d/sing-box"),
+        "/etc/config/sing-box": str(system / "config/sing-box"),
+        "/usr/local/bin/sbctl": str(system / "local-bin/sbctl"),
+        "/usr/bin/sbctl": str(system / "bin/sbctl"),
+        "/usr/bin/sb": str(system / "bin/sb"),
+    }
+    for path in [source / "install.sh", *list((source / "scripts").iterdir())]:
+        if not path.is_file():
+            continue
+        body = path.read_text()
+        for old, new in replacements.items():
+            body = body.replace(old, new)
+        path.write_text(body)
+    script(source / "openwrt/sing-box.init", """#!/bin/sh
+# OpenWrt procd service init script for sing-box eBPF (reF1nd)
+case "$1" in
+    enable) printf 'service:enable\\n' >> "$INSTALL_TEST_EVENTS" ;;
+    status) exit 1 ;;
+    *) printf 'unexpected-service:%s\\n' "$*" >> "$INSTALL_TEST_EVENTS"; exit 87 ;;
+esac
+""")
+    config = home / "config/config.json"
+    private_provider = home / "providers/local.json"
+    original_config = original_provider = None
+    if scenario == "preexisting-json":
+        config.parent.mkdir(parents=True)
+        private_provider.parent.mkdir(parents=True)
+        config.write_text(json.dumps({
+            "inbounds": [{"type": "mixed", "listen": "127.0.0.1", "listen_port": 17891}],
+            "outbounds": [{"type": "direct", "tag": "office"}],
+            "route": {"rules": [{"ip_cidr": ["10.77.2.4/32"], "action": "route", "outbound": "office"}]},
+        }) + "\n")
+        private_provider.write_text('{"fixture":"keep private provider"}\n')
+        original_config, original_provider = config.read_bytes(), private_provider.read_bytes()
+    env = os.environ.copy()
+    for name in ("SB_CONFIG_PARTS_TOOL", "SB_CONFIG_PARTS_EXPECTED", "SB_HTTP_PROXY", "SB_GITHUB_PROXY"):
+        env.pop(name, None)
+    env.update(PATH=str(tools), SH_SINGBOX_HOME=str(home),
+               SH_SINGBOX_CONFIG=str(config), SB_DOWNLOAD_MODE="direct",
+               INSTALL_TEST_EVENTS=str(events), INSTALL_TEST_REAL_SHA=real_sha,
+               INSTALL_TEST_ARCHIVE=str(archive),
+               INSTALL_TEST_ARCHIVE_DIGEST=archive_digest, SB_CHECK_TIMEOUT="5")
+    probe = subprocess.run([real_bash, "-c",
+                            "command -v timeout || command -v busybox || command -v cksum || command -v stat"],
+                           env=env, capture_output=True, text=True)
+    assert probe.returncode != 0 and not probe.stdout, "Strict installer PATH exposed a host optional utility"
+    result = subprocess.run([real_bash, str(source / "install.sh")], env=env,
+                            capture_output=True, text=True, timeout=60)
+    (root / "install.log").write_text(result.stdout + result.stderr)
+    diagnostics = result.stdout + result.stderr
+    if result.returncode != 0:
+        for name in ("core-update-check.log", "config-parts-last-error.log"):
+            log = home / "runtime" / name
+            if log.is_file():
+                diagnostics += f"\n{name}:\n" + log.read_text()
+    assert result.returncode == 0, f"{scenario}: isolated complete installation failed:\n{diagnostics}"
+    assert "Installation completed successfully!" in result.stdout
+    assert "Configuration validation succeeded" in result.stdout, f"{scenario}: final configuration check did not pass"
+    assert (home / "bin/sing-box").read_bytes() == (archive_source / "sing-box").read_bytes()
+    assert (system / "bin/sbctl").resolve() == home / "scripts/sbctl"
+    assert (system / "init.d/sing-box").is_file()
+    lines = events.read_text().splitlines()
+    assert "service:enable" in lines and not any(line.startswith("unexpected-service:") for line in lines)
+    assert any(line.startswith("core:check:") for line in lines), "Real controller did not run configuration validation"
+    if original_config is None:
+        assert config.is_file() and (home / "config/config.d/layout.json").is_file()
+        assert (home / "providers/xboard.json").is_file() and private_provider.is_file()
+        assert "Checking existing configuration with the new core:" not in result.stdout
+    else:
+        assert f"Checking existing configuration with the new core: {config}" in result.stdout
+        assert config.read_bytes() == original_config and private_provider.read_bytes() == original_provider
+        assert not (home / "config/config.d").exists(), "Retry silently converted a pre-existing single-file config"
+    print(f"PASS full installer without timeout/BusyBox/cksum/stat: {scenario}")
+PY
 echo 'Installation portability, source discovery and user configuration preservation tests passed.'

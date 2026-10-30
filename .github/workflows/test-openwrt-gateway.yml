@@ -110,6 +110,7 @@ jobs:
           # FEATURE_TR_EQUIV to n. The distribution BusyBox package usually
           # enables both and cannot reproduce this portability regression.
           # CKSUM and STAT also default to n, while SHA256SUM defaults to y.
+          # Also exercise custom firmware with no TIMEOUT or fractional sleep.
           # Pin upstream BusyBox 1.36.1 and build the applets exercised below.
           busybox_revision=1a64f6a20aaf6ea4dbba68bbfa8cc1ab7e5c57c4
           busybox_archive="$RUNNER_TEMP/bootstrap-busybox.tar.gz"
@@ -127,9 +128,9 @@ jobs:
           enabled = {
               'ASH', 'ASH_OPTIMIZE_FOR_SIZE', 'ASH_PRINTF', 'ASH_TEST',
               'TR', 'READLINK', 'FEATURE_READLINK_FOLLOW',
-              'DIRNAME', 'SED', 'GREP', 'CHMOD', 'SHA256SUM',
+              'DIRNAME', 'SED', 'GREP', 'CHMOD', 'SHA256SUM', 'SLEEP',
           }
-          disabled = {'FEATURE_TR_CLASSES', 'FEATURE_TR_EQUIV', 'CKSUM', 'STAT', 'FEATURE_STAT_FORMAT'}
+          disabled = {'FEATURE_TR_CLASSES', 'FEATURE_TR_EQUIV', 'CKSUM', 'STAT', 'FEATURE_STAT_FORMAT', 'TIMEOUT', 'FEATURE_FANCY_SLEEP'}
           lines = config.read_text().splitlines()
           for name in sorted(enabled | disabled):
               key = 'CONFIG_' + name
@@ -144,10 +145,14 @@ jobs:
           grep -qx '# CONFIG_FEATURE_TR_EQUIV is not set' "$busybox_source/.config"
           grep -qx '# CONFIG_CKSUM is not set' "$busybox_source/.config"
           grep -qx '# CONFIG_STAT is not set' "$busybox_source/.config"
+          grep -qx '# CONFIG_TIMEOUT is not set' "$busybox_source/.config"
+          grep -qx '# CONFIG_FEATURE_FANCY_SLEEP is not set' "$busybox_source/.config"
           grep -qx 'CONFIG_SHA256SUM=y' "$busybox_source/.config"
+          grep -qx 'CONFIG_SLEEP=y' "$busybox_source/.config"
           make -s -C "$busybox_source" -j2 busybox
           SB_TEST_BOOTSTRAP_BUSYBOX="$busybox_source/busybox" python3 tests/test_bootstrap_busybox.py
           SB_TEST_BOOTSTRAP_BUSYBOX="$busybox_source/busybox" bash tests/test_uninstall_ownership.sh
+          SB_TEST_SLEEP_BUSYBOX="$busybox_source/busybox" bash tests/test_timeout_guard.sh
       - name: Verify procd benign service deletion and preserve real errors
         run: sh tests/test_procd_ubus.sh
       - name: Verify runtime config paths, fresh LAN bind checks and offline script deployment

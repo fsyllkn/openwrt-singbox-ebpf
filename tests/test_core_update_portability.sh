@@ -6,7 +6,8 @@ TEST_DIR=$(mktemp -d /tmp/sb-core-update.XXXXXX)
 trap 'rm -rf "$TEST_DIR"' EXIT HUP INT TERM
 REAL_SHA=$(command -v sha256sum)
 REAL_BASH=$(command -v bash)
-export REAL_SHA
+REAL_TIMEOUT=$(command -v timeout)
+export REAL_SHA REAL_TIMEOUT
 mkdir -p "$TEST_DIR/tools" "$TEST_DIR/archive"
 cat > "$TEST_DIR/archive/sing-box" <<'SH'
 #!/bin/sh
@@ -26,6 +27,13 @@ case "$1" in
         fi
         if [ "${MOCK_HASH_FAIL_AFTER_CHECK:-0}" -eq 1 ]; then
             : > "$TEST_HASH_FAILURE_MARKER"
+        fi
+        if [ "${MOCK_CHECK_SLEEP:-0}" -gt 0 ]; then
+            printf '%s\n' "$$" > "$TEST_CHECK_PID"
+            exec sleep "$MOCK_CHECK_SLEEP"
+        fi
+        if [ "${MOCK_CONFIG_STATUS:-0}" -ne 0 ]; then
+            printf 'fixture core rejected configuration (exit %s)\n' "$MOCK_CONFIG_STATUS" >&2
         fi
         exit "${MOCK_CONFIG_STATUS:-0}" ;;
     *) exit 66 ;;
@@ -133,10 +141,41 @@ NO_HASH_PATH=$TEST_DIR/no-hash
 for tool_path in "$NO_CKSUM_PATH" "$APPLET_HASH_PATH" "$NO_HASH_PATH"; do
     mkdir -p "$tool_path"
     for tool in awk bash chmod cp curl dirname find grep gzip head id jq ldd \
-        mkdir mktemp mv readlink rm sed systemctl tar timeout touch tr uname; do
+        mkdir mktemp mv readlink rm sed sleep systemctl tar timeout touch tr uname; do
         ln -s "$(command -v "$tool")" "$tool_path/$tool"
     done
 done
+
+# Firmware may omit timeout entirely, or only expose its BusyBox applet while
+# --list is unavailable. Do not let the host timeout symlink mask either case.
+NO_TIMEOUT_PATH=$TEST_DIR/no-timeout
+APPLET_TIMEOUT_PATH=$TEST_DIR/applet-timeout
+for tool_path in "$NO_TIMEOUT_PATH" "$APPLET_TIMEOUT_PATH"; do
+    mkdir -p "$tool_path"
+    for tool in awk bash cat chmod cp curl dirname find grep gzip head id jq ldd \
+        mkdir mktemp mv readlink rm sed sha256sum sleep systemctl tar touch tr uname; do
+        ln -s "$(command -v "$tool")" "$tool_path/$tool"
+    done
+    if PATH=$tool_path "$REAL_BASH" -c 'command -v timeout'; then
+        fail 'missing-timeout fixture exposes host timeout'
+    fi
+done
+cat > "$APPLET_TIMEOUT_PATH/busybox" <<'SH'
+#!/bin/sh
+case "$1" in
+    timeout) shift; exec "$REAL_TIMEOUT" "$@" ;;
+    --list) exit 64 ;;
+    *) exit 127 ;;
+esac
+SH
+chmod 0755 "$APPLET_TIMEOUT_PATH/busybox"
+if PATH=$NO_TIMEOUT_PATH "$REAL_BASH" -c 'command -v busybox'; then
+    fail 'no-timeout fixture exposes BusyBox'
+fi
+"$APPLET_TIMEOUT_PATH/busybox" timeout 1 "$REAL_BASH" -c ':' || fail 'BusyBox timeout fixture cannot run a command'
+if "$APPLET_TIMEOUT_PATH/busybox" --list >/dev/null 2>&1; then
+    fail 'BusyBox timeout fixture unexpectedly supports --list'
+fi
 ln -s "$TEST_DIR/tools/sha256sum" "$NO_CKSUM_PATH/sha256sum"
 cat > "$APPLET_HASH_PATH/busybox" <<'SH'
 #!/bin/sh
@@ -179,9 +218,10 @@ prepare() {
     TEST_DOWNLOAD_ENV=$CASE_DIR/download-env
     TEST_CHECK_CONFIG_CAPTURE=$CASE_DIR/checked-config.json
     TEST_HASH_FAILURE_MARKER=$CASE_DIR/hash-failed-after-check
+    TEST_CHECK_PID=$CASE_DIR/check.pid
     TEST_ASSET=sing-box-1.15.0-alpha.99-reF1nd-linux-amd64-musl.tar.gz
     SB_DOWNLOAD_MODE=direct
-    export SH_SINGBOX_HOME SH_SINGBOX_CONFIG TEST_EVENTS TEST_ASSET TEST_DOWNLOAD_ARGS TEST_DOWNLOAD_ENV TEST_CHECK_CONFIG_CAPTURE TEST_HASH_FAILURE_MARKER SB_DOWNLOAD_MODE
+    export SH_SINGBOX_HOME SH_SINGBOX_CONFIG TEST_EVENTS TEST_ASSET TEST_DOWNLOAD_ARGS TEST_DOWNLOAD_ENV TEST_CHECK_CONFIG_CAPTURE TEST_HASH_FAILURE_MARKER TEST_CHECK_PID SB_DOWNLOAD_MODE
     mkdir -p "$SH_SINGBOX_HOME/bin" "$SH_SINGBOX_HOME/scripts"
     cat > "$SH_SINGBOX_HOME/bin/sing-box" <<'SH'
 #!/bin/sh
@@ -245,6 +285,74 @@ assert_parts_unchanged() {
     cmp "$CASE_DIR/original.json" "$SH_SINGBOX_CONFIG" || fail 'updater modified generated runtime JSON'
     ! grep -q '^unexpected-parts:' "$TEST_EVENTS" || fail 'updater attempted to render or commit configuration'
 }
+
+for timeout_backend in absent applet; do
+    case "$timeout_backend" in
+        absent) tool_path=$NO_TIMEOUT_PATH ;;
+        applet) tool_path=$APPLET_TIMEOUT_PATH ;;
+    esac
+    prepare "without-timeout-$timeout_backend"
+    if ! PATH=$tool_path MOCK_STOPPED=0 "$REAL_BASH" "$BASE/scripts/update-core.sh" \
+        1.15.0-alpha.99-reF1nd > "$CASE_DIR/out" 2>&1; then
+        cat "$CASE_DIR/out" >&2
+        [ ! -f "$SH_SINGBOX_HOME/runtime/core-update-check.log" ] || cat "$SH_SINGBOX_HOME/runtime/core-update-check.log" >&2
+        fail "$timeout_backend timeout environment blocked valid existing configuration"
+    fi
+    "$SH_SINGBOX_HOME/bin/sing-box" version | grep -Fq NEW-test-core || fail 'timeout-free update did not install the candidate'
+    cmp "$CASE_DIR/original.json" "$SH_SINGBOX_CONFIG" || fail 'timeout-free update modified private configuration'
+    [ "$(grep -c '^check:' "$TEST_EVENTS")" -eq 1 ] || fail 'configuration validation was skipped or executed more than once'
+    [ "$(grep -c '^restart:' "$TEST_EVENTS")" -eq 1 ] || fail 'timeout-free update did not restart running service once'
+done
+
+# Both a genuinely empty first install and a first install with a supplied
+# configuration must work. An absent old binary does not justify skipping a
+# configuration that already exists at the requested runtime path.
+prepare fresh_without_timeout
+rm "$SH_SINGBOX_HOME/bin/sing-box" "$SH_SINGBOX_CONFIG"
+PATH=$NO_TIMEOUT_PATH "$REAL_BASH" "$BASE/scripts/update-core.sh" \
+    1.15.0-alpha.99-reF1nd > "$CASE_DIR/out" 2>&1 || { cat "$CASE_DIR/out" >&2; fail 'empty first install requires timeout'; }
+"$SH_SINGBOX_HOME/bin/sing-box" version | grep -Fq NEW-test-core || fail 'empty first install did not acquire core'
+[ ! -e "$SH_SINGBOX_CONFIG" ] || fail 'core updater unexpectedly created a configuration'
+! grep -Eq '^(check:|restart:)' "$TEST_EVENTS" || fail 'empty first install checked nonexistent config or restarted service'
+
+prepare supplied_config_without_timeout
+rm "$SH_SINGBOX_HOME/bin/sing-box"
+PATH=$NO_TIMEOUT_PATH "$REAL_BASH" "$BASE/scripts/update-core.sh" \
+    1.15.0-alpha.99-reF1nd > "$CASE_DIR/out" 2>&1 || { cat "$CASE_DIR/out" >&2; fail 'first install with supplied config requires timeout'; }
+"$SH_SINGBOX_HOME/bin/sing-box" version | grep -Fq NEW-test-core || fail 'first install with supplied config did not acquire core'
+cmp "$CASE_DIR/original.json" "$SH_SINGBOX_CONFIG" || fail 'first install replaced supplied config'
+[ "$(grep -c '^check:' "$TEST_EVENTS")" -eq 1 ] || fail 'supplied config was not checked exactly once'
+! grep -q '^restart:' "$TEST_EVENTS" || fail 'first install started a stopped service'
+
+prepare rejected_config_without_timeout
+if PATH=$NO_TIMEOUT_PATH MOCK_STOPPED=0 MOCK_CONFIG_STATUS=27 "$REAL_BASH" "$BASE/scripts/update-core.sh" \
+    1.15.0-alpha.99-reF1nd > "$CASE_DIR/out" 2>&1; then
+    fail 'missing timeout hid actual core rejection'
+fi
+assert_old
+[ "$(grep -c '^check:' "$TEST_EVENTS")" -eq 1 ] || fail 'rejected config never reached core validation'
+grep -Fq 'fixture core rejected configuration (exit 27)' "$SH_SINGBOX_HOME/runtime/core-update-check.log" || fail 'actual core rejection was not retained'
+grep -Fq 'New core configuration check failed (exit 27)' "$CASE_DIR/out" || fail 'actual core failure status was misreported'
+! grep -q '^restart:' "$TEST_EVENTS" || fail 'rejected config restarted a running service'
+
+prepare hung_config_without_timeout
+check_result=0
+PATH=$NO_TIMEOUT_PATH MOCK_STOPPED=0 MOCK_CHECK_SLEEP=30 SB_CHECK_TIMEOUT=1 \
+    "$REAL_TIMEOUT" --kill-after=2 8 "$REAL_BASH" "$BASE/scripts/update-core.sh" \
+    1.15.0-alpha.99-reF1nd > "$CASE_DIR/out" 2>&1 || check_result=$?
+[ -s "$TEST_CHECK_PID" ] || fail 'hung check fixture did not start'
+check_pid=$(cat "$TEST_CHECK_PID")
+if kill -0 "$check_pid" 2>/dev/null; then
+    kill -KILL "$check_pid" 2>/dev/null || :
+    fail 'timed-out configuration check was left running'
+fi
+[ "$check_result" -eq 1 ] || fail "hung core was not stopped by its own validation deadline (exit $check_result)"
+assert_old
+grep -Eiq 'timed out|timeout expired' "$CASE_DIR/out" || fail 'validation deadline did not identify an actual timeout'
+! grep -Fq 'New core rejects the existing configuration' "$CASE_DIR/out" || fail 'timeout was misreported as configuration rejection'
+! grep -q '^restart:' "$TEST_EVENTS" || fail 'timed-out core check restarted a running service'
+echo 'Timeout-free first installs, retries, validation failures and bounded checks passed.'
+if [ "${SB_TEST_CORE_TIMEOUT_ONLY:-0}" -eq 1 ]; then exit 0; fi
 
 for hash_backend in standalone applet; do
     case "$hash_backend" in

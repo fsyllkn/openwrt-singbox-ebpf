@@ -11,6 +11,10 @@ cat > "$TEST_DIR/bin/sing-box" <<'EOF'
 case "$1" in
     check)
         if [ -n "${MOCK_CHECK_EVENTS:-}" ]; then printf 'check\n' >> "$MOCK_CHECK_EVENTS"; fi
+        if [ "${MOCK_CHECK_SLEEP:-0}" -ne 0 ]; then
+            printf '%s\n' "$$" > "$MOCK_CHECK_PID_FILE"
+            exec sleep "$MOCK_CHECK_SLEEP"
+        fi
         exit "${MOCK_CHECK_STATUS:-0}" ;;
     version) echo mock ;;
     *) exit 2 ;;
@@ -61,16 +65,17 @@ SH_SINGBOX_HOME="$TEST_DIR" bash "$BASE/scripts/sbctl" check > "$TEST_DIR/conten
     { echo 'FAILED: same-size same-mtime config edit reused stale validation' >&2; exit 1; }
 
 # A normal Linux PATH hides optional OpenWrt applets. Supply only the commands
-# used by sbctl check, deliberately omitting cksum in every case below.
+# used by sbctl check, deliberately omitting cksum and timeout below.
 REAL_BASH=$(command -v bash)
 REAL_SHA256=$(command -v sha256sum)
 REAL_STAT=$(command -v stat)
+REAL_TIMEOUT=$(command -v timeout)
 CACHE_CHECK_PATH="$TEST_DIR/cache-tools"
 CACHE_HASH_WRAPPER="$TEST_DIR/hash-backend"
 SB_TEST_HASH_BUSYBOX=${SB_TEST_HASH_BUSYBOX:-}
 export REAL_SHA256 CACHE_HASH_WRAPPER SB_TEST_HASH_BUSYBOX
 mkdir "$CACHE_CHECK_PATH"
-for command_name in readlink dirname mkdir chmod rm cat tail timeout grep awk; do
+for command_name in readlink dirname mkdir chmod rm cat tail sleep grep awk; do
     command_path=$(command -v "$command_name")
     ln -s "$command_path" "$CACHE_CHECK_PATH/$command_name"
 done
@@ -113,6 +118,9 @@ if [ -n "$SB_TEST_HASH_BUSYBOX" ]; then
 fi
 if PATH="$CACHE_CHECK_PATH" "$REAL_BASH" -c 'command -v cksum >/dev/null 2>&1'; then
     cache_fail 'isolated PATH unexpectedly contains cksum'
+fi
+if PATH="$CACHE_CHECK_PATH" "$REAL_BASH" -c 'command -v timeout >/dev/null 2>&1'; then
+    cache_fail 'isolated PATH unexpectedly contains timeout'
 fi
 
 # CI supplies the minimal compiled BusyBox; the local fallback forwards to a
@@ -186,4 +194,34 @@ for hash_failure in missing failure empty malformed; do
     unset MOCK_CHECK_STATUS
 done
 unset CACHE_HASH_BEHAVIOR
+
+# The core must remain bounded even when neither the timeout command nor its
+# BusyBox applet exists. The host timeout is only a test-harness deadlock guard.
+rm -f "$TEST_DIR/runtime/config.valid" "$CACHE_CHECK_PATH/sha256sum" "$CACHE_CHECK_PATH/busybox"
+ln -s "$CACHE_HASH_WRAPPER" "$CACHE_CHECK_PATH/sha256sum"
+: > "$MOCK_CHECK_EVENTS"
+check_status=0
+PATH="$CACHE_CHECK_PATH" SH_SINGBOX_HOME="$TEST_DIR" \
+    SH_SINGBOX_CONFIG="$TEST_DIR/config/config.json" \
+    SB_CHECK_TIMEOUT=1 MOCK_CHECK_SLEEP=30 MOCK_CHECK_PID_FILE="$TEST_DIR/check.pid" \
+    "$REAL_TIMEOUT" 8 "$REAL_BASH" "$BASE/scripts/sbctl" check > "$TEST_DIR/no-timeout-hang.log" 2>&1 || check_status=$?
+[ "$check_status" -eq 1 ] || cache_fail "missing-timeout check did not fail within its own deadline (exit $check_status)"
+grep -q 'Configuration check timed out after 1s' "$TEST_DIR/no-timeout-hang.log" ||
+    cache_fail 'missing-timeout check did not report the actual deadline'
+[ ! -e "$TEST_DIR/runtime/config.valid" ] || cache_fail 'timed-out core check was cached'
+cache_check_count 1 'timed-out check was executed more than once'
+check_pid=$(cat "$TEST_DIR/check.pid")
+if kill -0 "$check_pid" 2>/dev/null; then
+    kill "$check_pid" 2>/dev/null || :
+    cache_fail 'timed-out core check left its child running'
+fi
+for invalid_timeout in 0 invalid; do
+    : > "$MOCK_CHECK_EVENTS"
+    if SB_CHECK_TIMEOUT="$invalid_timeout" limited_check > "$TEST_DIR/invalid-timeout.log" 2>&1; then
+        cache_fail 'invalid configuration-check deadline was accepted'
+    fi
+    grep -q 'SB_CHECK_TIMEOUT must be a positive integer' "$TEST_DIR/invalid-timeout.log" ||
+        cache_fail 'invalid deadline lacks an actionable diagnostic'
+    cache_check_count 0 'invalid deadline still ran the core check'
+done
 echo 'sbctl validation and cache fallback tests passed.'

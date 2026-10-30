@@ -135,17 +135,13 @@ restart_core_service() {
 check_candidate_config() {
     local candidate="$1" config="$2" max_seconds="${SB_CHECK_TIMEOUT:-90}"
     [[ "$max_seconds" =~ ^[0-9]+$ ]] && [ "$max_seconds" -gt 0 ] || {
-        err "SB_CHECK_TIMEOUT must be a positive integer"
-        return 1
+        printf '%s\n' 'SB_CHECK_TIMEOUT must be a positive integer' >&2
+        return 125
     }
-    if command -v timeout >/dev/null 2>&1; then
-        (cd "$SERVICE_DIR" && timeout "$max_seconds" "$candidate" check -c "$config")
-    elif command -v busybox >/dev/null 2>&1 && busybox --list 2>/dev/null | grep -qx timeout; then
-        (cd "$SERVICE_DIR" && busybox timeout "$max_seconds" "$candidate" check -c "$config")
-    else
-        err "A timeout utility is required to validate an existing configuration before a core update"
-        return 1
-    fi
+    # The shared runner retains a deadline even on firmware without timeout.
+    # Do not infer applet availability from a --list | grep -q pipeline.
+    (cd "$SERVICE_DIR" || exit 125
+     sb_run_with_timeout "$max_seconds" "$candidate" check -c "$config")
 }
 
 # Build without render/preflight: the currently installed core must never
@@ -275,11 +271,20 @@ do_update() {
 
     if [ -n "$UPDATE_CONFIG" ]; then
         info "Checking existing configuration with the new core: $SH_SINGBOX_CONFIG"
-        check_candidate_config "$candidate" "$UPDATE_CONFIG" > "$TMP_DIR/config-check.log" 2>&1 || {
+        local check_status=0
+        check_candidate_config "$candidate" "$UPDATE_CONFIG" > "$TMP_DIR/config-check.log" 2>&1 || check_status=$?
+        if [ "$check_status" -ne 0 ]; then
             cp "$TMP_DIR/config-check.log" "$RUNTIME_DIR/core-update-check.log"
             chmod 0600 "$RUNTIME_DIR/core-update-check.log"
-            die "New core rejects the existing configuration; current core and service are unchanged. Review $RUNTIME_DIR/core-update-check.log"
-        }
+            case "$check_status" in
+                124) err "Configuration check timed out after ${SB_CHECK_TIMEOUT:-90}s; current core and service are unchanged." ;;
+                125) err "Cannot run the configuration check; current core and service are unchanged." ;;
+                126|127) err "Cannot execute the new core configuration check (exit $check_status); current core and service are unchanged." ;;
+                129|130|137|143) err "Configuration check was interrupted (exit $check_status); current core and service are unchanged." ;;
+                *) err "New core configuration check failed (exit $check_status); current core and service are unchanged." ;;
+            esac
+            die "Review $RUNTIME_DIR/core-update-check.log"
+        fi
     fi
     verify_update_config_unchanged || die "Configuration changed during core validation; finish the edit and retry. Current core and service are unchanged."
 

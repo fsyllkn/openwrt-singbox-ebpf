@@ -450,6 +450,14 @@ bash ./install.sh --scripts-only
 
 `Configuration preparation failed; current core and service are unchanged` 表示更新在替换核心和重启服务前中止。不要为了绕过该提示删除个人配置；SHA-256 检查仍会拦截更新期间发生的配置修改。
 
+### 旧版提示需要 `timeout`，却显示“新核心拒绝配置”
+
+如果 `core-update-check.log` 中是 `A timeout utility is required ...`，检查还没有执行到核心。旧版把外部 `timeout` 当成更新前提，BusyBox 的 applet 列表探测也可能失败，却把这些执行环境问题统一显示为 `New core rejects the existing configuration`。这个组合提示不能说明 JSON 配置有错。
+
+新版核心更新和 `sbctl` 配置检查使用同一个内置限时执行器，依靠安装器已有的 Bash 和基础 `sleep`，无需单独安装 `timeout`，也不依赖 BusyBox 的 `--list` 输出。检查默认最多运行 90 秒，超时后终止检查进程；不响应终止信号的进程最多再给 2 秒后强制结束。正常退出、超时、执行失败和中断会分别报告，详情仍保存在原检查日志中。配置检查失败时不会替换核心或重启现有服务。
+
+按本节的源码及脚本更新流程部署修复；如果安装曾中断，更新源码后重跑 `bash ./install.sh`。安装器支持空白运行目录，也支持首次安装时已经放好配置的目录。日志中的 `Checking existing configuration` 只表示当时运行路径下已经有配置文件，不要求先完成过服务安装，更不需要删除该文件来绕过检查。
+
 ## 8. 常用菜单和诊断
 
 | 一级菜单 | 二级功能 |
@@ -489,6 +497,8 @@ GitHub Actions 覆盖 shell 语法、分级菜单导航、回车确认、模拟�
 引导路径测试还会编译关闭 `FEATURE_TR_CLASSES` / `FEATURE_TR_EQUIV` 的 BusyBox，使用其真实 ash 和工具验证普通目录、中文/空格目录、控制字符拒绝与启动器清理，避免只在 GNU 工具环境下通过测试。
 
 同一 BusyBox 构建启用 `SHA256SUM`，明确关闭 `CKSUM` 和 `STAT`。核心更新和配置缓存测试使用不含 `cksum` 的独立命令目录，验证独立 SHA-256 工具及真实 BusyBox applet 两种方式，并检查同大小/同修改时间的配置编辑、摘要失败或无效输出不会绕过更新保护或误用缓存。
+
+限时检查还覆盖没有 `timeout` 命令或 applet 的环境，验证真实退出码、超时、中断和子进程回收。安装集成测试在隔离目录实际执行完整安装器、更新器、配置组合工具和控制器，分别从空白运行目录和预存配置开始，检查配置保留及 CLI/procd 注册；网络、包管理和测试核心由夹具代替，测试不会安装软件包或改动宿主服务。
 
 除了对完整 JSON 执行真实核心 `check`，CI 还使用同一固定核心验证分文件初始化、节点编辑、私网路由和丢失输出重建。另一个只有 loopback 的独立 network namespace 会真正启动核心：验证本地样例加载、selector 节点选择、HTTP 片段从本地模拟订阅获取节点及缓存重启。Provider 启动测试保留公开配置的 Provider/selector 结构，移除了与其无关的 eBPF、远程规则集和 WebUI 下载，不向虚拟订阅地址发请求。
 

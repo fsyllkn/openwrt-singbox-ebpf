@@ -150,19 +150,13 @@ validate_config_full() {
     local check_status=0 max_seconds
     max_seconds="${SB_CHECK_TIMEOUT:-90}"
     case "$max_seconds" in
-        ''|*[!0-9]*) err "SB_CHECK_TIMEOUT must be an integer number of seconds"; return 1 ;;
+        ''|*[!0-9]*) err "SB_CHECK_TIMEOUT must be a positive integer"; return 1 ;;
     esac
-    if [ "$INIT_SYSTEM" = "procd" ] && command -v timeout >/dev/null 2>&1; then
-        (cd "$SERVICE_DIR" && timeout "$max_seconds" "$BIN" check -c "$CONFIG") >> "$CHECK_LOG" 2>&1 || check_status=$?
-    elif [ "$INIT_SYSTEM" = "procd" ] && command -v busybox >/dev/null 2>&1 &&
-         busybox --list 2>/dev/null | grep -qx timeout; then
-        (cd "$SERVICE_DIR" && busybox timeout "$max_seconds" "$BIN" check -c "$CONFIG") >> "$CHECK_LOG" 2>&1 || check_status=$?
-    else
-        (cd "$SERVICE_DIR" && "$BIN" check -c "$CONFIG") >> "$CHECK_LOG" 2>&1 || check_status=$?
-        if [ "$INIT_SYSTEM" = "procd" ]; then
-            warn "timeout applet unavailable; check duration is not bounded"
-        fi
-    fi
+    [ "$max_seconds" -gt 0 ] || { err "SB_CHECK_TIMEOUT must be a positive integer"; return 1; }
+    # Always bound validation, including minimal firmware without timeout and
+    # service repairs launched from a systemd host.
+    (cd "$SERVICE_DIR" || exit 125
+     sb_run_with_timeout "$max_seconds" "$BIN" check -c "$CONFIG") >> "$CHECK_LOG" 2>&1 || check_status=$?
     if [ "$check_status" -eq 0 ]; then
         # Validation cache is only an optimization. An unavailable cache must
         # never turn a passing sing-box check into a failed procd startup.
@@ -176,7 +170,11 @@ validate_config_full() {
 
     if [ "$check_status" -eq 124 ]; then
         err "Configuration check timed out after ${max_seconds}s (remote providers, DNS, network or resource pressure)."
-    elif [ "$check_status" -eq 137 ] || [ "$check_status" -eq 143 ]; then
+    elif [ "$check_status" -eq 125 ]; then
+        err "Cannot run the configuration check; check the installed scripts and execution environment."
+    elif [ "$check_status" -eq 126 ] || [ "$check_status" -eq 127 ]; then
+        err "Cannot execute the configuration check (exit $check_status)."
+    elif [ "$check_status" -eq 129 ] || [ "$check_status" -eq 130 ] || [ "$check_status" -eq 137 ] || [ "$check_status" -eq 143 ]; then
         err "Configuration check was terminated (exit $check_status); inspect logread/dmesg for OOM or signals."
     else
         err "Configuration check failed (exit $check_status)."
