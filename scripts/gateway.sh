@@ -351,6 +351,11 @@ apply() {
     cat > "$nft_rules" <<EOF
 add table inet $TABLE
 add chain inet $TABLE prerouting { type filter hook prerouting priority mangle; policy accept; }
+# Exclude limited and directed IPv4 broadcasts before DNS interception.
+# NetBIOS 137/138 and other LAN broadcasts must not create proxy UDP sockets.
+# FIB broadcast covers the real interface subnet, including /23 networks.
+add rule inet $TABLE prerouting iifname "$IFACE" ip saddr $LAN_CIDR ip daddr 255.255.255.255 counter return
+add rule inet $TABLE prerouting iifname "$IFACE" ip saddr $LAN_CIDR fib daddr type broadcast counter return
 # Intercept DNS before any on-link exemptions (TCP and UDP 53).
 add rule inet $TABLE prerouting iifname "$IFACE" ip saddr $LAN_CIDR meta l4proto tcp tcp dport 53 counter tproxy ip to :$PORT meta mark set $MARK accept
 add rule inet $TABLE prerouting iifname "$IFACE" ip saddr $LAN_CIDR meta l4proto udp udp dport 53 counter tproxy ip to :$PORT meta mark set $MARK accept
