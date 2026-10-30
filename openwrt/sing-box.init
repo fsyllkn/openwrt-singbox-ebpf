@@ -214,7 +214,8 @@ start_service() {
     procd_set_param respawn 3600 5 0
     procd_set_param stdout 1
     procd_set_param stderr 1
-    procd_set_param limits nofile="infinity"
+    # procd only accepts "unlimited" or numeric soft/hard limits; "infinity" is ignored.
+    procd_set_param limits nofile="65535 65535"
     procd_close_instance
 }
 
