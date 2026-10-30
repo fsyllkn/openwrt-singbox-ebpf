@@ -44,6 +44,20 @@ remove_owned_sbctl_link "$TEST_DIR/links/regular"
 # treated as literal data. This includes old double-quoted launchers while
 # supporting the POSIX quoting used by bootstrap for arbitrary clone paths.
 (
+    # Default OpenWrt builds disable BusyBox tr character classes. Model the
+    # resulting literal deletion set, or use the minimal real BusyBox supplied
+    # by CI, before checking cleanup against the exact generated launcher.
+    tr() {
+        if [ -n "${SB_TEST_BOOTSTRAP_BUSYBOX:-}" ]; then
+            "$SB_TEST_BOOTSTRAP_BUSYBOX" tr "$@"
+        elif [ "$#" -eq 2 ] && [ "$1" = -d ] && [ "$2" = '[:cntrl:]' ]; then
+            command tr -d 'clnrt:[]'
+        else
+            command tr "$@"
+        fi
+    }
+    [ "$(printf '%s' './quick-install.sh' | tr -d '[:cntrl:]')" = './quik-isa.sh' ] ||
+        fail 'class-disabled tr fixture does not match OpenWrt behavior'
     source_dir=$TEST_DIR/source
     fixture_launcher=$TEST_DIR/links/sb
     side_effect=$TEST_DIR/launcher-was-executed
@@ -106,6 +120,23 @@ PY
     printf '#!/bin/sh\nexec /bin/sh "/menu.sh" "$@"\n' > "$fixture_launcher"
     remove_owned_sb_launcher "$fixture_launcher" ''
     [ -f "$fixture_launcher" ] || fail 'empty source matched an unrelated root launcher'
+
+    # Control characters cannot appear in the line-based source record. A
+    # syntactically matching launcher with such a path is not ours to delete.
+    for control in $'\n' $'\r' $'\t' $'\033' $'\177'; do
+        for kind in source installed; do
+            INSTALL_DIR=$TEST_DIR/installation
+            source_dir=$TEST_DIR/source
+            case "$kind" in
+                source) source_dir=$source_dir$control; menu_path=$source_dir/menu.sh ;;
+                installed) INSTALL_DIR=$INSTALL_DIR$control; menu_path=$INSTALL_DIR/scripts/menu.sh ;;
+            esac
+            printf '#!/bin/sh\nexec /bin/sh "%s" "$@"\n' "$menu_path" > "$fixture_launcher"
+            cp "$fixture_launcher" "$TEST_DIR/launcher-before"
+            remove_owned_sb_launcher "$fixture_launcher" "$source_dir"
+            cmp "$TEST_DIR/launcher-before" "$fixture_launcher" || fail "$kind control-character launcher changed"
+        done
+    done
     [ ! -e "$side_effect" ] || fail 'ownership check evaluated a path'
 )
 

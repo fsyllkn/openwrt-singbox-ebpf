@@ -102,6 +102,48 @@ jobs:
           python3 tests/test_menu_layout.py
           sh tests/test_menu_navigation.sh
           SB_TEST_BUSYBOX="$busybox_path" python3 tests/test_terminal_input.py
+      - name: Verify bootstrap with OpenWrt-style BusyBox character classes disabled
+        shell: bash
+        run: |
+          set -euo pipefail
+          # OpenWrt enables tr but defaults FEATURE_TR_CLASSES and
+          # FEATURE_TR_EQUIV to n. The distribution BusyBox package usually
+          # enables both and cannot reproduce this portability regression.
+          # Pin upstream BusyBox 1.36.1 and build only the bootstrap applets.
+          busybox_revision=1a64f6a20aaf6ea4dbba68bbfa8cc1ab7e5c57c4
+          busybox_archive="$RUNNER_TEMP/bootstrap-busybox.tar.gz"
+          busybox_source="$RUNNER_TEMP/bootstrap-busybox"
+          curl -q -fL --retry 2 --connect-timeout 15 --max-time 120 \
+            "https://codeload.github.com/mirror/busybox/tar.gz/$busybox_revision" \
+            -o "$busybox_archive"
+          mkdir -p "$busybox_source"
+          tar -xzf "$busybox_archive" --strip-components=1 -C "$busybox_source"
+          make -s -C "$busybox_source" allnoconfig
+          python3 - "$busybox_source/.config" <<'PY'
+          from pathlib import Path
+          import sys
+          config = Path(sys.argv[1])
+          enabled = {
+              'ASH', 'ASH_OPTIMIZE_FOR_SIZE', 'ASH_PRINTF', 'ASH_TEST',
+              'TR', 'READLINK', 'FEATURE_READLINK_FOLLOW',
+              'DIRNAME', 'SED', 'GREP', 'CHMOD',
+          }
+          disabled = {'FEATURE_TR_CLASSES', 'FEATURE_TR_EQUIV'}
+          lines = config.read_text().splitlines()
+          for name in sorted(enabled | disabled):
+              key = 'CONFIG_' + name
+              lines = [line for line in lines if not line.startswith(key + '=') and line != '# ' + key + ' is not set']
+              lines.append(key + '=y' if name in enabled else '# ' + key + ' is not set')
+          config.write_text('\n'.join(lines) + '\n')
+          PY
+          # BusyBox 1.36.1 has oldconfig, not olddefconfig. Supplying defaults
+          # through process substitution avoids a yes/SIGPIPE pipefail error.
+          make -s -C "$busybox_source" oldconfig < <(yes '')
+          grep -qx '# CONFIG_FEATURE_TR_CLASSES is not set' "$busybox_source/.config"
+          grep -qx '# CONFIG_FEATURE_TR_EQUIV is not set' "$busybox_source/.config"
+          make -s -C "$busybox_source" -j2 busybox
+          SB_TEST_BOOTSTRAP_BUSYBOX="$busybox_source/busybox" python3 tests/test_bootstrap_busybox.py
+          SB_TEST_BOOTSTRAP_BUSYBOX="$busybox_source/busybox" bash tests/test_uninstall_ownership.sh
       - name: Verify procd benign service deletion and preserve real errors
         run: sh tests/test_procd_ubus.sh
       - name: Verify runtime config paths, fresh LAN bind checks and offline script deployment

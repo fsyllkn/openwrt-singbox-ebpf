@@ -31,6 +31,19 @@ sh ./quick-install.sh
 
 脚本直接使用自己所在的完整源码目录，注册 `sb` 并打开菜单。仓库放在哪个目录，就从哪个目录使用；不会自动复制到另一个预设位置。也可以在其他工作目录通过 `sh '/实际的源码目录/quick-install.sh'` 启动。
 
+如果旧版引导脚本在普通目录下误报 `Source directory must not contain control characters or line breaks.`，请在实际源码目录更新引导脚本后重试：
+
+```sh
+cd '/实际的源码目录' &&
+bootstrap_tmp=$(mktemp ./quick-install.sh.XXXXXX) &&
+wget -O "$bootstrap_tmp" https://raw.githubusercontent.com/fsyllkn/openwrt-singbox-ebpf/main/quick-install.sh &&
+sh -n "$bootstrap_tmp" &&
+mv -f "$bootstrap_tmp" ./quick-install.sh &&
+sh ./quick-install.sh
+```
+
+这是旧校验依赖 BusyBox 可选 `tr` 字符类别支持造成的误判；新版使用 shell 自身的路径校验，无需移动仓库或安装 GNU 工具。以上命令仅替换引导脚本并打开菜单。也可在电脑上下载新版 `quick-install.sh`，上传覆盖源码目录中的同名文件，再执行 `sh ./quick-install.sh`。
+
 ### 尚未下载源码：在线引导
 
 先在 OpenWrt SSH 中进入希望保存项目的持久目录，再执行下面的命令。`/tmp/sb-openwrt.sh` 只是临时引导脚本；没有现成仓库时，源码会准备在**当前工作目录的 `openwrt-singbox-ebpf` 子目录**。当前工作目录已经是完整仓库时，则原地使用：
@@ -464,6 +477,8 @@ logread -e sing-box
 ## 9. 验证与发布内容
 
 GitHub Actions 覆盖 shell 语法、分级菜单导航、回车确认、模拟终端退格与隐藏输入、运行路径、配置保留、UID、网关、核心更新回滚、安装卸载、下载代理及独立引导流程；分文件与特色路由测试覆盖无损迁移、分组引用、增删改及排序、事务回滚、缓存失效、并发编辑和停止保护。在 CI Linux 上解析并加载/移除实际生成的 nft 规则，公开配置还有结构化脱敏检查。
+
+引导路径测试还会编译关闭 `FEATURE_TR_CLASSES` / `FEATURE_TR_EQUIV` 的 BusyBox，使用其真实 ash 和工具验证普通目录、中文/空格目录、控制字符拒绝与启动器清理，避免只在 GNU 工具环境下通过测试。
 
 除了对完整 JSON 执行真实核心 `check`，CI 还使用同一固定核心验证分文件初始化、节点编辑、私网路由和丢失输出重建。另一个只有 loopback 的独立 network namespace 会真正启动核心：验证本地样例加载、selector 节点选择、HTTP 片段从本地模拟订阅获取节点及缓存重启。Provider 启动测试保留公开配置的 Provider/selector 结构，移除了与其无关的 eBPF、远程规则集和 WebUI 下载，不向虚拟订阅地址发请求。
 

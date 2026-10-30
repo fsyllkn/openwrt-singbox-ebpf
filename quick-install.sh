@@ -311,8 +311,16 @@ EOF
 validate_source_path() {
     # Source records use one literal path per line. Other characters, including
     # Unicode and shell punctuation, are safe because the launcher quotes them.
-    [ "$(printf '%s' "$1" | LC_ALL=C tr -d '[:cntrl:]')" = "$1" ] ||
+    # OpenWrt disables BusyBox FEATURE_TR_CLASSES by default, so tr would treat
+    # [:cntrl:] as literal letters and reject ordinary paths. Shell patterns do
+    # support character classes; keep the byte locale local to this check.
+    if ! (
+        LC_ALL=C
+        export LC_ALL
+        case "$1" in *[[:cntrl:]]*) exit 1 ;; esac
+    ); then
         error 'Source directory must not contain control characters or line breaks.'
+    fi
 }
 validate_source_target() {
     case "$1" in

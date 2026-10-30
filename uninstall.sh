@@ -40,13 +40,15 @@ quote_shell_path() {
 }
 
 remove_owned_sb_launcher() {
-    local launcher="$1" source_dir="${2:-}" menu_path quoted_path
+    local launcher="$1" source_dir="${2:-}" menu_path quoted_path LC_ALL=C
     [ -f "$launcher" ] && [ ! -L "$launcher" ] || return 0
     # Match the complete generated file as data. A comment mentioning our
     # path, additional commands, or a symlink is not proof of ownership.
     for menu_path in "$INSTALL_DIR/scripts/menu.sh" "${source_dir:+$source_dir/menu.sh}"; do
         case "$menu_path" in /*) ;; *) continue ;; esac
-        [ "$menu_path" = "$(printf '%s' "$menu_path" | LC_ALL=C tr -d '[:cntrl:]')" ] || continue
+        # OpenWrt's BusyBox tr need not support character classes. Bash can
+        # check the path directly, with a byte locale scoped to this function.
+        case "$menu_path" in *[[:cntrl:]]*) continue ;; esac
         quoted_path=$(quote_shell_path "$menu_path")
         if printf '#!/bin/sh\nexec /bin/sh %s "$@"\n' "$quoted_path" | cmp -s - "$launcher" ||
            printf '#!/bin/sh\nexec /bin/sh "%s" "$@"\n' "$menu_path" | cmp -s - "$launcher"; then
