@@ -147,6 +147,14 @@ jq '.inbounds[0].listen = "0.0.0.0" | .inbounds[1].listen = "127.0.0.2"' \
     MOCK_IP_STATUS=87; export MOCK_IP_STATUS
     run_cli preflight > "$TEST_DIR/wildcard.log" 2>&1
 ) || fail 'wildcard/127.0.0.2 bind was rejected'
+# IPv6 literals remain outside the IPv4-address enumeration, including on a
+# jq build with no regex engine. They must not force an IPv4 address dump.
+jq '.inbounds[0].listen = "::" | .inbounds[1].listen = "::1"' \
+    "$TEST_DIR/valid.json" > "$TEST_CONFIG"
+(
+    MOCK_IP_STATUS=87; export MOCK_IP_STATUS
+    run_cli preflight > "$TEST_DIR/ipv6.log" 2>&1
+) || fail 'IPv6-only listeners incorrectly required IPv4 addresses'
 cp "$TEST_DIR/valid.json" "$TEST_CONFIG"
 if (
     MOCK_IP_STATUS=87; export MOCK_IP_STATUS

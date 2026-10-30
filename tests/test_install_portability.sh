@@ -493,7 +493,8 @@ tools = work / "tools"
 tools.mkdir()
 real_bash = shutil.which("bash")
 real_sha = shutil.which("sha256sum")
-assert real_bash and real_sha
+real_unzip = shutil.which("unzip")
+assert real_bash and real_sha and real_unzip
 for name in ("awk", "basename", "bash", "cat", "chmod", "cmp", "cp", "date",
              "dirname", "find", "grep", "gzip", "head", "jq", "ln", "mkdir",
              "mktemp", "mv", "readlink", "rm", "rmdir", "sed", "sh", "sleep",
@@ -539,6 +540,10 @@ script(tools / "opkg", """#!/bin/sh
 printf 'package:update\\n' >> "$INSTALL_TEST_EVENTS"
 """)
 script(tools / "curl", """#!/bin/sh
+if [ "$*" = '-q --version' ]; then
+    printf 'curl fixture\\nProtocols: http https\\n'
+    exit 0
+fi
 destination=
 url=
 while [ "$#" -gt 0 ]; do
@@ -561,6 +566,7 @@ case "$url" in
 esac
 """)
 script(tools / "unzip", """#!/bin/sh
+case "${2:-}" in */sb-install-unzip.*/probe.zip) exec "$INSTALL_TEST_REAL_UNZIP" "$@" ;; esac
 destination=
 while [ "$#" -gt 0 ]; do
     case "$1" in -d) destination=$2; shift 2 ;; *) shift ;; esac
@@ -583,6 +589,7 @@ for scenario in ("fresh", "preexisting-json"):
     for directory in ("init.d", "config", "bin", "local-bin"):
         (system / directory).mkdir(parents=True)
     (system / "openwrt_release").write_text("fixture\n")
+    (system / "ca-bundle.pem").write_text("-----BEGIN CERTIFICATE-----\n")
     replacements = {
         "/etc/openwrt_release": str(system / "openwrt_release"),
         "/etc/init.d/sing-box": str(system / "init.d/sing-box"),
@@ -625,6 +632,7 @@ esac
     env.update(PATH=str(tools), SH_SINGBOX_HOME=str(home),
                SH_SINGBOX_CONFIG=str(config), SB_DOWNLOAD_MODE="direct",
                INSTALL_TEST_EVENTS=str(events), INSTALL_TEST_REAL_SHA=real_sha,
+               INSTALL_TEST_REAL_UNZIP=real_unzip, CURL_CA_BUNDLE=str(system / "ca-bundle.pem"),
                INSTALL_TEST_ARCHIVE=str(archive),
                INSTALL_TEST_ARCHIVE_DIGEST=archive_digest, SB_CHECK_TIMEOUT="5")
     probe = subprocess.run([real_bash, "-c",

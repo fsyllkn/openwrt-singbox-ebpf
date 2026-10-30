@@ -115,7 +115,10 @@ release_hash() {
     digest=$(jq -er --arg asset "$filename" '
       [.assets[]? | select(.name == $asset)]
       | if length == 1 then .[0].digest else error("requested asset is unavailable") end
-      | select(type == "string" and test("^sha256:[0-9a-fA-F]{64}$"))
+      | select(type == "string")
+      | select(startswith("sha256:") and length == 71)
+      | select(.[7:] | explode | all(.[];
+          (. >= 48 and . <= 57) or (. >= 65 and . <= 70) or (. >= 97 and . <= 102)))
     ' "$TMP_DIR/release.json") ||
         die "Release $version has no uniquely identified SHA256-verified asset $filename; existing core is unchanged"
     printf '%s\n' "${digest#sha256:}" | tr 'A-F' 'a-f'

@@ -92,12 +92,21 @@ if [ "$action" = configure ]; then
     # and dashboard ports vary between installations; no fixed port blacklist.
     port_conflict=$(jq -r --arg ip "$listen" --argjson port "$port" '
         def overlaps: . == $ip or . == "0.0.0.0" or . == "::" or . == "[::]";
+        def api_listener:
+          if type != "string" then null
+          else split(":") as $parts
+            | if ($parts|length) < 2 then null
+              else $parts[-1] as $number
+                | if ($number|length) == 0 or ($number | explode | any(.[]; . < 48 or . > 57))
+                  then null
+                  else {host: ($parts[0:-1]|join(":")), port: ($number|tonumber)} end
+              end
+          end;
         any(.inbounds[]?; .tag!="lan-mixed" and .listen_port==$port and ((.listen // "::") | overlaps))
         or any(.services[]?; .listen_port==$port and ((.listen // "::") | overlaps))
         or any(.outbounds[]?; .type=="socks" and .server_port==$port and .server==$ip)
-        or ((.experimental.clash_api.external_controller // "" |
-             try capture("^(?<host>.*):(?<port>[0-9]+)$") catch null) as $api
-            | $api != null and ($api.port|tonumber)==$port and ($api.host|overlaps))
+        or ((.experimental.clash_api.external_controller // "" | api_listener) as $api
+            | $api != null and $api.port==$port and ($api.host|overlaps))
     ' "$CONFIG") || die 'Cannot inspect configured listener ports; original config unchanged.'
     if [ "$port_conflict" = true ]; then
         die 'Port conflicts with another configured listener or a SOCKS backend at this address; choose an unused port.'

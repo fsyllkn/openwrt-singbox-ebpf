@@ -299,6 +299,35 @@ echo '3: br-edge.42 inet 10.23.40.45/23 scope global br-edge.42'
         guard([{'include_uid_range': ['700:710'], 'exclude_uid': [700]}], {101: 700}, True)
         guard([{'include_uid': [701]}], {101: 700}, True)
 
+    def uid_number_grammar_and_uint32_bounds():
+        # UID parsing must not rely on jq's optional regex engine. Exercise
+        # the actual process guard with scalar/array selectors and keep the
+        # accepted Go-style bases/separators and uint32 boundary intact.
+        for encoded, uid in [
+                ('0', 0), ('00', 0), ('0_0', 0), ('0x_0', 0),
+                ('0o_0', 0), ('0b_0', 0), ('123_456', 123456),
+                ('4294967295', 4294967295), ('4_294_967_295', 4294967295),
+                ('0xffffffff', 4294967295), ('0X_FF_FF_FF_FF', 4294967295),
+                ('0o37777777777', 4294967295), ('037777777777', 4294967295),
+                ('0b11111111111111111111111111111111', 4294967295)]:
+            try:
+                guard([{'exclude_uid': encoded}], {101: uid}, True)
+                guard([{'exclude_uid': [encoded]}], {101: uid}, True)
+            except AssertionError as error:
+                raise AssertionError((encoded, uid, error)) from error
+        for encoded in ['', '_', '_0', '0_', '0__0', '00_', '0x', '0x_',
+                        '0x__0', '0x0_', '0xg', '0o8', '0b2', '08', '0_8',
+                        '00__1', '01_8', '1__0', '1_', '+700', '-1',
+                        ' 700', '700 ', '700\n', '700\r', '７００', '١٠',
+                        '4294967296', '0x100000000', '040000000000',
+                        '0b100000000000000000000000000000000',
+                        -1, 4294967296, 700.5, True, {}]:
+            try:
+                guard([{'exclude_uid': [encoded]}], {101: 700}, False,
+                      'Cannot evaluate eBPF UID selectors')
+            except AssertionError as error:
+                raise AssertionError((encoded, error)) from error
+
     def inconsistent_or_unreadable_credentials():
         for fields in [[700, 701, 700, 700], [700, 700, 701, 700], [700, 700, 700, 701]]:
             guard([{'exclude_uid_range': '0:1000'}], {101: fields}, False, 'mixed real/effective/saved/fs')
@@ -327,7 +356,8 @@ echo '3: br-edge.42 inet 10.23.40.45/23 scope global br-edge.42'
     for case in [filter_selection_and_backup, rejected_filters_are_atomic,
                  process_rules_preserve_custom_policy, actual_uids_and_all_pids,
                  implicit_local_enablement_matches_pinned_core,
-                 inclusive_ranges_and_number_bases, inconsistent_or_unreadable_credentials,
+                 inclusive_ranges_and_number_bases, uid_number_grammar_and_uint32_bounds,
+                 inconsistent_or_unreadable_credentials,
                  invalid_policy_does_not_pass_the_guard, malformed_json_does_not_mean_disabled_ebpf]:
         try:
             pid_file.write_text('')

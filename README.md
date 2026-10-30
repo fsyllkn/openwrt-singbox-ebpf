@@ -19,6 +19,26 @@
 
 脚本不会自动更换接管模式来绕过固件限制。MIPS、32 位 ARM 等没有本项目已配置的安装包时会提前报错。LAN IPv4 TProxy 不等于已经接管客户端 IPv6；真实转发、DNS 和客户端行为仍需在设备上验证。
 
+### 安装依赖与能力检查
+
+完整安装会先处理必需软件，再部署运行脚本、下载核心和注册服务。OpenWrt 使用实际可用的 `opkg` 或 `apk`，包管理操作沿用项目的下载代理设置。依赖检查验证脚本实际需要的功能；命令存在、软件包管理器返回成功，都不单独作为检查通过的依据。
+
+| 必需能力 | 检查与缺失时的处理 |
+| --- | --- |
+| HTTPS 下载 | 检查 `curl` 的 HTTPS 协议支持，缺失时安装 `curl` |
+| TLS 证书 | 检查可读且非空的 CA 证书包，缺失时安装 `ca-bundle`；显式设置的 `CURL_CA_BUNDLE` 也必须指向可读的证书文件 |
+| JSON 处理 | 实际执行 JSON、数组、字面字符串和数字操作，缺失时安装标准 `jq` |
+| Bash 运行能力 | 验证非交互作业控制等实际使用的能力，缺失时安装 `bash` |
+| ZIP 解压 | 实际用 `unzip -qo ... -d ...` 解压一个本地样例并核对内容，失败时安装 `unzip` |
+| SHA-256 | 核对空输入的已知摘要，支持独立命令或 BusyBox applet；验证失败时安装 `coreutils-sha256sum` |
+| 整数等待 | 验证 `sleep 0`；不可用时安装 `coreutils-sleep` |
+
+已有工具满足要求时不会在 OpenWrt 上重复安装这些包。缺项安装后会再次执行功能检查；如果软件源不可用、安装失败，或 PATH 仍指向不能工作的工具，会明确报错并在部署服务文件前停止。`awk`、`tar`、`mktemp` 等固件基础工具也会检查是否存在。无需为本项目额外安装 `cksum`、原生 `timeout` 或完整版 `jq-full`。
+
+OpenWrt 的标准 `jq` 软件包默认不带 Oniguruma 正则库，`jq-full` 才包含正则功能。本项目使用标准 `jq` 能提供的 JSON、字面字符串和数字操作，不要求升级到 `jq-full`。安装时仍会实际运行 JSON 功能检查，避免损坏、错误路径或不兼容的工具到服务启动时才暴露。[OpenWrt jq 软件包定义](https://github.com/openwrt/packages/blob/master/utils/jq/Makefile)
+
+基础软件依赖和固件的 cgroup/BPF、TProxy 能力分别检查。完整安装不会为未选择的网关模式提前下载内核模块。`--scripts-only` 仍用于已有安装的离线脚本更新，不自动安装软件包或重启服务；需要补齐依赖时使用完整安装/修复入口。
+
 ## 2. 获取源码并打开菜单
 
 ### 已经克隆或解压了仓库
@@ -458,6 +478,12 @@ bash ./install.sh --scripts-only
 
 按本节的源码及脚本更新流程部署修复；如果安装曾中断，更新源码后重跑 `bash ./install.sh`。安装器支持空白运行目录，也支持首次安装时已经放好配置的目录。日志中的 `Checking existing configuration` 只表示当时运行路径下已经有配置文件，不要求先完成过服务安装，更不需要删除该文件来绕过检查。
 
+### 核心校验通过，随后报 jq 缺少 ONIGURUMA
+
+如果先显示 `Configuration valid`，随后出现 `jq was compiled without ONIGURUMA regex library` 和 `Cannot inspect inbound listeners`，失败发生在管理脚本的设备预检阶段。旧版安装了 OpenWrt 默认的无正则 `jq`，脚本却调用 `test`、`capture` 或 `gsub`，两者不匹配。
+
+新版已经移除监听地址、UID、配置分片、API 地址及更新工具中的这些非必要正则依赖，仍然校验本机监听地址、UID 排除、摘要和端口冲突。更新源码后部署脚本，再执行 `sbctl preflight`；确认通过后再启动或重启。已有完整安装可按上面的 `--scripts-only` 流程部署；若安装尚未完成，或希望同时补齐并验证依赖，应执行 `bash ./install.sh`。不要通过删除预检或忽略错误强行启动。
+
 ## 8. 常用菜单和诊断
 
 | 一级菜单 | 二级功能 |
@@ -493,6 +519,8 @@ logread -e sing-box
 ## 9. 验证与发布内容
 
 GitHub Actions 覆盖 shell 语法、分级菜单导航、回车确认、模拟终端退格与隐藏输入、运行路径、配置保留、UID、网关、核心更新回滚、安装卸载、下载代理及独立引导流程；分文件与特色路由测试覆盖无损迁移、分组引用、增删改及排序、事务回滚、缓存失效、并发编辑和停止保护。在 CI Linux 上解析并加载/移除实际生成的 nft 规则，公开配置还有结构化脱敏检查。
+
+CI 按 OpenWrt 标准软件包的方式，以固定源码版本和校验值编译 `--without-oniguruma` 的真实 jq。先确认其正则函数确实不可用，再让安装、启动预检、UID、分片、网关及 API 测试使用这个二进制；需要 sudo 的测试也显式保留该工具路径，避免误用 CI 主机上的完整版 jq。
 
 引导路径测试还会编译关闭 `FEATURE_TR_CLASSES` / `FEATURE_TR_EQUIV` 的 BusyBox，使用其真实 ash 和工具验证普通目录、中文/空格目录、控制字符拒绝与启动器清理，避免只在 GNU 工具环境下通过测试。
 

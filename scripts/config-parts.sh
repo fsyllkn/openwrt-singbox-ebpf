@@ -128,9 +128,12 @@ validate_layout() {
     [ ! -e "$CP_PARTS/.transaction" ] && [ ! -L "$CP_PARTS/.transaction" ] || die 'An incomplete parts transaction exists. Restore its private backup before preparing this configuration.'
     [ -f "$CP_PARTS/layout.json" ] || die 'Parts directory has no layout.json marker; refusing to use an old generated configuration.'
     jq -e '
+      def sha256_hex:
+        if type != "string" then false
+        else length == 64 and (explode | all(.[]; (. >= 48 and . <= 57) or (. >= 97 and . <= 102))) end;
       type == "object" and .format == "sing-box-config-parts" and .version == 1
       and (.generation | type == "number" and . >= 1 and floor == .)
-      and ([.generated_sha256,.sources_sha256,.policy_sha256] | all(.[]; type == "string" and test("^[a-f0-9]{64}$")))
+      and ([.generated_sha256,.sources_sha256,.policy_sha256] | all(.[]; sha256_hex))
     ' "$CP_PARTS/layout.json" >/dev/null 2>&1 || die 'Unsupported or malformed parts layout.json; refusing stale generated output.'
     for name in "${CP_NAMES[@]}"; do
         [ -f "$CP_PARTS/$name.json" ] || die "Missing or unreadable source: $name.json. Refusing stale generated output."

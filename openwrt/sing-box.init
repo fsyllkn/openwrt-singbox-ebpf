@@ -110,7 +110,8 @@ check_cgroup2() {
        | select((.local.data_plane // "") == "" or .local.data_plane == "cgroup")
        | (.local.cgroup_path // "")
        | if . == "" then "@default"
-         elif type != "string" or test("[\r\n]") then error("invalid cgroup path")
+         elif type != "string" then error("invalid cgroup path")
+         elif contains("\r") or contains("\n") then error("invalid cgroup path")
          else . end] | unique | join("\n")
     ' "$CONFIG") || {
         echo 'sing-box: cannot determine cgroup requirements from configuration.' >&2

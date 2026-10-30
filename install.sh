@@ -179,16 +179,21 @@ render_systemd_service() {
     esac
     jq -nr --arg home "$INSTALL_DIR" --arg config "$CONFIG" \
         --rawfile unit "$INSTALL_DIR/systemd/sing-box.service" '
-      def escaped: gsub("\\\\"; "\\\\") | gsub("\""; "\\\"") | gsub("%"; "%%");
+      # Literal replacements also work when jq is built without regex support.
+      def escaped: split("\\") | join("\\\\") | split("\"") | join("\\\"") | split("%") | join("%%");
       ($home | escaped) as $home_path | ($config | escaped) as $config_path |
       $unit | split("\n") | map(
         if startswith("WorkingDirectory=") then
-          "WorkingDirectory=" + ($home | gsub("%"; "%%"))
+          "WorkingDirectory=" + ($home | split("%") | join("%%"))
         else
         startswith("Exec") as $command |
-        gsub("(?<path>/opt/sing-box/config/config[.]json|/opt/sing-box)";
-          (if .path == "/opt/sing-box/config/config.json" then $config_path else $home_path end) |
-          if $command then gsub("\\$"; "$$") else . end)
+        ($home_path | if $command then split("$") | join("$$") else . end) as $home_replacement |
+        ($config_path | if $command then split("$") | join("$$") else . end) as $config_replacement |
+        # Split the longer token first, transform only original fragments, then
+        # join. Replacement paths containing either token are never rescanned.
+        split("/opt/sing-box/config/config.json") |
+        map(split("/opt/sing-box") | join($home_replacement)) |
+        join($config_replacement)
         end
       ) | join("\n")
     ' > "$output" || die "Cannot render systemd service for the selected runtime paths"
@@ -345,35 +350,150 @@ fi
 # -----------------------------------------------------------------------------
 info "Installing required packages..."
 sb_download_load || die "Invalid download configuration; no packages were changed"
+
+# Probe the operations used by this project, not optional jq regex features or
+# a version banner. These checks do not read or modify the running config.
+installer_dependency_ready() {
+    local dependency=$1 output line digest probe_dir probe_text probe_status=1 bundle
+    case "$dependency" in
+        curl)
+            command -v curl >/dev/null 2>&1 || return 1
+            output=$(curl -q --version 2>/dev/null) || return 1
+            while IFS= read -r line; do
+                case "$line" in
+                    Protocols:*) case " ${line#Protocols:} " in *' https '*) return 0 ;; esac ;;
+                esac
+            done <<< "$output"
+            return 1 ;;
+        jq)
+            command -v jq >/dev/null 2>&1 || return 1
+            output=$(jq -cen --arg text 'A._B' --argjson values '[1,2]' '
+              {text:$text,values:$values}
+              | .text=="A._B" and (.text|ascii_downcase|split(".")|join("/")=="a/_b")
+                and (.values|all(.[]; type=="number" and .>0))
+                and ("0123"|explode|all(.[]; .>=48 and .<=57))
+                and ((["a","b"]|index("b"))==1)
+            ' 2>/dev/null) || return 1
+            [ "$output" = true ] ;;
+        bash)
+            command -v bash >/dev/null 2>&1 || return 1
+            output=$(bash -c 'set -m || exit 1; case $- in *m*) ;; *) exit 1 ;; esac
+              [ -n "${BASHPID:-}" ] || exit 1
+              (exit 0) & child=$!; wait "$child" || exit 1
+              printf ready' 2>/dev/null) || return 1
+            [ "$output" = ready ] ;;
+        sha256)
+            if command -v sha256sum >/dev/null 2>&1; then
+                output=$(sha256sum </dev/null 2>/dev/null) || return 1
+            elif command -v busybox >/dev/null 2>&1; then
+                output=$(busybox sha256sum </dev/null 2>/dev/null) || return 1
+            else
+                return 1
+            fi
+            digest=${output%% *}
+            [ "$digest" = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 ] ;;
+        sleep)
+            command -v sleep >/dev/null 2>&1 && sleep 0 >/dev/null 2>&1 ;;
+        ca)
+            if [ -n "${CURL_CA_BUNDLE:-}" ]; then
+                [ -r "$CURL_CA_BUNDLE" ] && [ -s "$CURL_CA_BUNDLE" ] &&
+                    grep -Fq -- '-----BEGIN CERTIFICATE-----' "$CURL_CA_BUNDLE"
+                return
+            fi
+            for bundle in /etc/ssl/certs/ca-certificates.crt /etc/ssl/cert.pem /etc/ssl/ca-bundle.pem; do
+                if [ -r "$bundle" ] && [ -s "$bundle" ] &&
+                    grep -Fq -- '-----BEGIN CERTIFICATE-----' "$bundle"; then return 0; fi
+            done
+            return 1 ;;
+        unzip)
+            command -v unzip >/dev/null 2>&1 || return 1
+            probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/sb-install-unzip.XXXXXX") || return 1
+            # One stored ZIP member, probe.txt = "ready\n". No optional
+            # encoder or network is needed to check the exact extraction flags.
+            if printf '%b' '\x50\x4b\x03\x04\x14\x00\x00\x00\x00\x00\x00\x00\x21\x00\x6f\x2d\x96\x74\x06\x00\x00\x00\x06\x00\x00\x00\x09\x00\x00\x00\x70\x72\x6f\x62\x65\x2e\x74\x78\x74\x72\x65\x61\x64\x79\x0a\x50\x4b\x01\x02\x14\x03\x14\x00\x00\x00\x00\x00\x00\x00\x21\x00\x6f\x2d\x96\x74\x06\x00\x00\x00\x06\x00\x00\x00\x09\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x80\x01\x00\x00\x00\x00\x70\x72\x6f\x62\x65\x2e\x74\x78\x74\x50\x4b\x05\x06\x00\x00\x00\x00\x01\x00\x01\x00\x37\x00\x00\x00\x2d\x00\x00\x00\x00\x00' > "$probe_dir/probe.zip" &&
+               unzip -qo "$probe_dir/probe.zip" -d "$probe_dir/extracted" >/dev/null 2>&1 &&
+               IFS= read -r probe_text < "$probe_dir/extracted/probe.txt" && [ "$probe_text" = ready ]; then
+                probe_status=0
+            fi
+            rm -rf "$probe_dir"
+            return "$probe_status" ;;
+        *) return 1 ;;
+    esac
+}
+
+installer_dependency_description() {
+    case "$1" in
+        curl) printf '%s' 'curl with HTTPS support' ;;
+        jq) printf '%s' 'jq JSON parsing and literal string/array operations (regex is not required)' ;;
+        bash) printf '%s' 'Bash with non-interactive job control' ;;
+        sha256) printf '%s' 'working SHA-256 (sha256sum or BusyBox sha256sum)' ;;
+        sleep) printf '%s' 'integer sleep' ;;
+        ca) printf '%s' 'readable TLS CA certificate bundle' ;;
+        unzip) printf '%s' 'unzip with -qo archive -d directory extraction' ;;
+    esac
+}
+
+dependency_manager= dependency_indexes_ready=0
 if [ "$OS" = "debian_ubuntu" ]; then
+    command -v apt-get >/dev/null 2>&1 || die "apt-get is required to install missing Debian/Ubuntu dependencies"
+    dependency_manager=apt-get
     export DEBIAN_FRONTEND=noninteractive
     sb_download_run apt-get update -qq || true
+    dependency_indexes_ready=1
     sb_download_run apt-get install -y -qq curl ca-certificates tar jq procps unzip nftables iproute2 2>/dev/null ||
-        sb_download_run apt-get install -y -qq curl ca-certificates tar jq procps
+        sb_download_run apt-get install -y -qq curl ca-certificates tar jq procps unzip ||
+        die "Dependency installation failed with apt-get; check package indexes and the configured download proxy before retrying"
 elif [ "$OS" = "openwrt" ]; then
     # opkg is still standard on many 24.x/custom images; newer images use apk.
     if command -v opkg >/dev/null 2>&1; then
-        manager=opkg
+        dependency_manager=opkg
     elif command -v apk >/dev/null 2>&1; then
-        manager=apk
-    else
-        die "Neither opkg nor apk found on OpenWrt."
+        dependency_manager=apk
     fi
-    sb_download_run "$manager" update || warn "$manager update incomplete; trying available indexes"
-    for requirement in "curl:curl" "jq:jq" "bash:bash" "unzip:unzip"; do
-        command_name="${requirement%%:*}"
-        package_name="${requirement#*:}"
-        if ! command -v "$command_name" >/dev/null 2>&1; then
-            if [ "$manager" = opkg ]; then
-                sb_download_run opkg install "$package_name" || die "Missing $command_name (package $package_name)"
-            else
-                sb_download_run apk add "$package_name" || die "Missing $command_name (package $package_name)"
-            fi
-        fi
-    done
     # nftables, ip-full and kmod-nft-tproxy are gateway-only prerequisites.
     # Do not download kernel modules before the user selects gateway mode.
 fi
+
+# Normal OpenWrt images provide these BusyBox basics. Debian/Ubuntu's package
+# step above also supplies tar/procps on minimal images. Do not invent package
+# mappings for an incomplete OpenWrt base firmware.
+for base_command in awk basename cat chmod cp date dirname find grep head id ln mkdir mktemp mv pidof readlink rm rmdir sed sh tar tr uname wc; do
+    command -v "$base_command" >/dev/null 2>&1 ||
+        die "Missing base tool '$base_command'. Restore the OS's BusyBox/base utilities before installation; no service files were deployed."
+done
+
+# Install only failed capabilities on OpenWrt, then repeat the actual probe.
+# This is deliberately part of full installation, after the --scripts-only
+# early return, so offline script repair never starts a package transaction.
+for dependency in ca curl jq bash unzip sha256 sleep; do
+    if installer_dependency_ready "$dependency"; then continue; fi
+    dependency_description=$(installer_dependency_description "$dependency")
+    case "$dependency" in
+        ca) dependency_package=ca-bundle; [ "$OS" != debian_ubuntu ] || dependency_package=ca-certificates ;;
+        sha256) dependency_package=coreutils-sha256sum; [ "$OS" != debian_ubuntu ] || dependency_package=coreutils ;;
+        sleep) dependency_package=coreutils-sleep; [ "$OS" != debian_ubuntu ] || dependency_package=coreutils ;;
+        *) dependency_package=$dependency ;;
+    esac
+    [ -n "$dependency_manager" ] ||
+        die "Missing or unusable $dependency_description. No supported package manager is available; install package '$dependency_package' with the firmware's package tools and retry. No service files were deployed."
+    if [ "$dependency_indexes_ready" -eq 0 ]; then
+        sb_download_run "$dependency_manager" update || warn "$dependency_manager update incomplete; trying available indexes"
+        dependency_indexes_ready=1
+    fi
+    info "Installing dependency: $dependency_description (package $dependency_package)"
+    case "$dependency_manager" in
+        apt-get) sb_download_run apt-get install -y -qq "$dependency_package" ;;
+        opkg) sb_download_run opkg install "$dependency_package" ;;
+        apk) sb_download_run apk add "$dependency_package" ;;
+    esac || die "Cannot install package '$dependency_package' with $dependency_manager for $dependency_description; check the package feed and download proxy. No service files were deployed."
+    hash -r
+    installer_dependency_ready "$dependency" ||
+        die "Package '$dependency_package' was installed with $dependency_manager, but $dependency_description is still unavailable. Check the executable selected by PATH or a custom CA bundle; no service files were deployed."
+done
+for dependency in ca curl jq bash unzip sha256 sleep; do
+    installer_dependency_ready "$dependency" ||
+        die "Dependency recheck failed: $(installer_dependency_description "$dependency"). No service files were deployed."
+done
 ok "Required installer dependencies available"
 
 # -----------------------------------------------------------------------------

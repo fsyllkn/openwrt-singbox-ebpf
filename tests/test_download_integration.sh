@@ -5,6 +5,8 @@ BASE=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 TEST_DIR=$(mktemp -d /tmp/sb-download-integration.XXXXXX)
 trap 'rm -rf "$TEST_DIR"' EXIT HUP INT TERM
 fail() { printf 'FAILED: %s\n' "$*" >&2; exit 1; }
+TEST_REAL_UNZIP=$(command -v unzip)
+export TEST_REAL_UNZIP
 mkdir -p "$TEST_DIR/tools"
 
 # Keep the complete production package/UI blocks. Nothing in these runners
@@ -37,7 +39,9 @@ case "$1" in
       if [ "${1:-}" = -v ] && [ "$#" -eq 2 ]; then
         case "$2" in
           opkg|apk) [ "$TEST_MANAGER" = "$2" ] || return 1 ;;
-          curl|jq|bash|unzip) [ "$OS" != openwrt ] || return 1 ;;
+          curl|jq|bash|unzip) [ "$OS" != openwrt ] || [ -f "$TEST_INSTALLED_PACKAGES/$2" ] || return 1 ;;
+          # Minimal Debian images gain pidof from the initial procps install.
+          pidof) [ "$OS" != debian_ubuntu ] || [ -f "$TEST_INSTALLED_PACKAGES/pidof" ] || return 1 ;;
         esac
       fi
       builtin command "$@"
@@ -53,6 +57,10 @@ SH
 cat > "$TEST_DIR/tools/curl" <<'SH'
 #!/bin/sh
 set -eu
+if [ "$*" = '-q --version' ]; then
+  printf 'curl fixture\nProtocols: http https\n'
+  exit 0
+fi
 output= url= method=GET header= noproxy=
 printf '%s\n' "$*" >> "$TEST_ARGS_LOG"
 while [ "$#" -gt 0 ]; do
@@ -108,11 +116,21 @@ set -eu
 printf '%s %s\n' "${0##*/}" "$*" >> "$TEST_COMMAND_LOG"
 printf '%s|%s|%s|%s|%s|%s|%s|%s\n' "${http_proxy-}" "${https_proxy-}" "${all_proxy-}" \
   "${HTTP_PROXY-}" "${HTTPS_PROXY-}" "${ALL_PROXY-}" "${no_proxy-}" "${NO_PROXY-}" >> "$TEST_COMMAND_ENV"
+case "${1:-}" in
+  install|add)
+    for package in "$@"; do
+      case "$package" in
+        curl|jq|bash|unzip) : > "$TEST_INSTALLED_PACKAGES/$package" ;;
+        procps) : > "$TEST_INSTALLED_PACKAGES/pidof" ;;
+      esac
+    done ;;
+esac
 SH
 for package_command in apt-get opkg apk; do cp "$TEST_DIR/package-command" "$TEST_DIR/tools/$package_command"; done
 cat > "$TEST_DIR/tools/unzip" <<'SH'
 #!/bin/sh
 [ "$#" -eq 4 ] && [ "$1" = -qo ] && [ "$3" = -d ] || exit 64
+case "$2" in */sb-install-unzip.*/probe.zip) exec "$TEST_REAL_UNZIP" "$@" ;; esac
 [ "$(cat "$2")" = 'mock UI archive' ] || exit 64
 mkdir -p "$4/dist"
 printf '<!doctype html><title>fixture UI</title>\n' > "$4/dist/index.html"
@@ -144,12 +162,16 @@ prepare_case() {
   TEST_COMMAND_ENV=$CASE_DIR/command-env
   TEST_PARENT_ENV=$CASE_DIR/parent-env
   TEST_API_LOG=$CASE_DIR/api
+  TEST_INSTALLED_PACKAGES=$CASE_DIR/installed-packages
+  CURL_CA_BUNDLE=$CASE_DIR/ca-bundle.pem
   SB_DOWNLOAD_MODE=$2
   SB_HTTP_PROXY=$TEST_SELECTED_PROXY
   SB_GITHUB_PROXY=https://download-mirror.example/proxy/
   export SH_SINGBOX_HOME SH_SINGBOX_CONFIG TEST_ARGS_LOG TEST_DOWNLOAD_LOG TEST_DOWNLOAD_ENV
   export TEST_COMMAND_LOG TEST_COMMAND_ENV TEST_PARENT_ENV TEST_API_LOG SB_DOWNLOAD_MODE SB_HTTP_PROXY SB_GITHUB_PROXY
-  mkdir -p "$CASE_DIR"
+  export TEST_INSTALLED_PACKAGES CURL_CA_BUNDLE
+  mkdir -p "$CASE_DIR" "$TEST_INSTALLED_PACKAGES"
+  printf '%s\n' '-----BEGIN CERTIFICATE-----' > "$CURL_CA_BUNDLE"
   for log in "$TEST_ARGS_LOG" "$TEST_DOWNLOAD_LOG" "$TEST_DOWNLOAD_ENV" "$TEST_COMMAND_LOG" "$TEST_COMMAND_ENV" "$TEST_API_LOG"; do : > "$log"; done
 }
 assert_environment() {

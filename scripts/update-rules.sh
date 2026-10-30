@@ -83,7 +83,8 @@ update_providers() (
     trap 'rm -f "$auth_file"' EXIT
     if ! jq -jr '
         (.experimental.clash_api.secret // "") as $secret
-        | if ($secret|type)!="string" or ($secret|test("[\r\n]")) then error("invalid API secret format")
+        | if ($secret|type)!="string" then error("invalid API secret format")
+          elif ($secret | contains("\r") or contains("\n")) then error("invalid API secret format")
           elif $secret=="" then "" else "Authorization: Bearer " + $secret + "\n" end
     ' "$CONFIG" > "$auth_file"; then
         warn 'Cannot prepare API authentication; provider update skipped.'

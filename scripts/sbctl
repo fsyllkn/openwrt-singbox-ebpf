@@ -213,19 +213,24 @@ def items: if .==null then [] elif type=="array" then . else [.] end;
 def local_enabled:
   .type=="ebpf" and (.local.enabled==true
     or (.local.enabled==null and .shared.enabled==null));
+def uid_digits($base; $prefix):
+  (if $prefix and startswith("_") then .[1:] else . end) as $raw
+  | if ($raw|length)>0 and ($raw|startswith("_")|not)
+       and ($raw|endswith("_")|not) and ($raw|contains("__")|not)
+    then ($raw|split("_")|join("")) else error("Unsupported UID number") end
+  | if all(explode[];
+       (.>=48 and .<48+([$base,10]|min)) or ($base==16 and .>=97 and .<=102))
+    then . else error("Unsupported UID number") end;
 def u32:
   (if type=="number" then .
    elif type=="string" then
-     (ascii_downcase
-      | if test("^(0x_?[0-9a-f]+(_[0-9a-f]+)*|0o_?[0-7]+(_[0-7]+)*|0b_?[01]+(_[01]+)*|0(_?[0-7]+)+|0|[1-9][0-9]*(_[0-9]+)*)$")
-        then gsub("_";"") else error("Unsupported UID number") end) as $s
-     | (if $s|test("^0x[0-9a-f]+$") then [16,$s[2:]]
-        elif $s|test("^0o[0-7]+$") then [8,$s[2:]]
-        elif $s|test("^0b[01]+$") then [2,$s[2:]]
-        elif $s|test("^0[0-7]+$") then [8,$s[1:]]
-        elif $s|test("^(0|[1-9][0-9]*)$") then [10,$s]
-        else error("Unsupported UID number") end) as $parts
-     | reduce ($parts[1]|explode[]) as $c
+     ascii_downcase as $s
+     | (if $s|startswith("0x") then [16,$s[2:],true]
+        elif $s|startswith("0o") then [8,$s[2:],true]
+        elif $s|startswith("0b") then [2,$s[2:],true]
+        elif ($s|startswith("0")) and $s!="0" then [8,$s[1:],true]
+        else [10,$s,false] end) as $parts
+     | reduce ($parts[1]|uid_digits($parts[0];$parts[2])|explode[]) as $c
          (0; .*$parts[0] + (if $c<=57 then $c-48 else $c-87 end))
    else error("Invalid UID type") end)
   | if .>=0 and .<=4294967295 and floor==. then . else error("UID is outside uint32") end;
@@ -290,8 +295,14 @@ check_xtunnel_exclusions() {
 check_listener_addresses() {
     local listeners addresses tag listen port failed=0
     command -v jq >/dev/null 2>&1 || { err "jq is required for listener preflight."; return 1; }
-    listeners="$(jq -r '.inbounds[]? | select(.listen? | type == "string")
-        | select(.listen | test("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$"))
+    # Some OpenWrt jq builds omit Oniguruma. Literal splitting and ASCII
+    # checks keep the IPv4 bind guard independent of optional regex support.
+    listeners="$(jq -r 'def ipv4_literal:
+          split(".") as $parts
+          | ($parts|length)==4
+            and all($parts[]; length>0 and all(explode[]; .>=48 and .<=57));
+        .inbounds[]? | select(.listen? | type == "string")
+        | select(.listen | ipv4_literal)
         | select(.listen != "0.0.0.0" and (.listen | startswith("127.") | not))
         | [(.tag // .type), .listen, (.listen_port // "-" | tostring)] | @tsv' "$CONFIG")" || {
         err "Cannot inspect inbound listeners in $CONFIG"; return 1;
