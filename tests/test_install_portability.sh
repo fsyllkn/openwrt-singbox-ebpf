@@ -26,10 +26,22 @@ awk '/^SCRIPTS_ONLY=0$/ { exit } { print }' "$BASE/install.sh" > "$ENV_SOURCE/in
 cat >> "$ENV_SOURCE/install-env.sh" <<'SH'
 [ "$SB_CONFIG_PARTS_TOOL" = "$INSTALL_DIR/scripts/config-parts.sh" ] || exit 71
 bash -c '[ "$SB_CONFIG_PARTS_TOOL" = "$SH_SINGBOX_HOME/scripts/config-parts.sh" ]' || exit 72
+[ "$REPO_ROOT" = "$TEST_EXPECTED_SOURCE" ] || exit 73
 SH
 SH_SINGBOX_HOME="$TEST_DIR/environment home" SH_SINGBOX_CONFIG="$TEST_DIR/environment config.json" \
     SB_CONFIG_PARTS_TOOL="$ENV_SOURCE/scripts/missing-source-tool.sh" \
+    TEST_EXPECTED_SOURCE="$ENV_SOURCE" \
     bash "$ENV_SOURCE/install-env.sh" || fail 'installer or child retained an inherited source tool path'
+ln -s "$ENV_SOURCE" "$TEST_DIR/installer directory alias"
+ln -s "$ENV_SOURCE/install-env.sh" "$TEST_DIR/installer-file-alias.sh"
+for installer_path in "$TEST_DIR/installer directory alias/install-env.sh" "$TEST_DIR/installer-file-alias.sh"; do
+    (
+        cd "$TEST_DIR"
+        CDPATH="$TEST_DIR/unrelated" TEST_EXPECTED_SOURCE="$ENV_SOURCE" \
+            SH_SINGBOX_HOME="$TEST_DIR/environment home" SH_SINGBOX_CONFIG="$TEST_DIR/environment config.json" \
+            bash "$installer_path"
+    ) || fail 'installer did not resolve its physical source through a directory/file alias'
+done
 
 INSTALL_DIR=$TEST_DIR/custom\ installation
 CONFIG=$TEST_DIR/external\ config/router.json
@@ -373,6 +385,25 @@ fi
 grep -Fq 'Unsupported architecture: mips' "$TEST_DIR/unsupported.log" || fail 'unsupported platform error unclear'
 [ ! -e "$TEST_DIR/unsupported" ] || fail 'unsupported architecture mutated installation'
 
+# Source and deployed service must remain separate, even through symlinks.
+# Unsupported mocked architecture is a second stop before any deployment if
+# the new early guard regresses; no real package/network operations can occur.
+GUARD_SOURCE=$TEST_DIR/same-directory\ source
+mkdir -p "$GUARD_SOURCE/scripts"
+cp "$BASE/install.sh" "$GUARD_SOURCE/install.sh"
+for helper in runtime-paths.sh download.sh config-parts-lib.sh; do
+    cp "$BASE/scripts/$helper" "$GUARD_SOURCE/scripts/$helper"
+done
+ln -s "$GUARD_SOURCE" "$TEST_DIR/same-directory-alias"
+for guard_home in "$GUARD_SOURCE" "$TEST_DIR/same-directory-alias"; do
+    if PATH="$TEST_DIR/bin:$PATH" SH_SINGBOX_HOME="$guard_home" \
+        bash "$GUARD_SOURCE/install.sh" > "$TEST_DIR/same-directory.log" 2>&1; then
+        fail 'source was accepted as its own service deployment directory'
+    fi
+    grep -Fq 'Source checkout and service directory must be different' "$TEST_DIR/same-directory.log" || fail 'source/service identity was not rejected before platform/dependency checks'
+    [ ! -e "$GUARD_SOURCE/runtime" ] && [ ! -e "$GUARD_SOURCE/config" ] && [ ! -e "$GUARD_SOURCE/bin" ] || fail 'same-directory rejection created deployment state'
+done
+
 # Exercise the real offline bootstrap with only its OS marker and launcher
 # paths redirected to the fixture. No network, /etc or /usr writes occur.
 BOOT_SOURCE=$TEST_DIR/bootstrap\ source
@@ -416,12 +447,27 @@ PATH="$TEST_DIR/bin:$PATH" SB_INSTALL_SOURCE_DIR="$TEST_DIR/target-alias" \
     sh "$TEST_DIR/bootstrap.sh" --source "$BOOT_TARGET" --no-menu > "$TEST_DIR/same-source.log" 2>&1 ||
     fail 'canonical source/target identity was not recognized'
 cp "$TEST_DIR/sb-launcher" "$TEST_DIR/launcher-before"
-mkdir "$TEST_DIR/unsafe;target"
-ln -s "$TEST_DIR/unsafe;target" "$TEST_DIR/unsafe-alias"
-for unsafe_target in "$TEST_DIR/unsafe;target" "$TEST_DIR/unsafe-alias"; do
+LITERAL_TARGET="$TEST_DIR/项目; 'single' \"double\" "'$(touch SHOULD_NOT_RUN) `touch SHOULD_NOT_RUN`'
+mkdir "$LITERAL_TARGET"
+cp "$BOOT_SOURCE/menu.sh" "$LITERAL_TARGET/menu.sh"
+ln -s "$LITERAL_TARGET" "$TEST_DIR/literal-source-alias"
+for literal_target in "$LITERAL_TARGET" "$TEST_DIR/literal-source-alias"; do
+    PATH="$TEST_DIR/bin:$PATH" SB_INSTALL_SOURCE_DIR="$literal_target" \
+        sh "$TEST_DIR/bootstrap.sh" --source "$BOOT_SOURCE" --no-menu > "$TEST_DIR/literal-target.log" 2>&1 || {
+        cat "$TEST_DIR/literal-target.log" >&2; fail 'literal Unicode/punctuation source directory was rejected'
+    }
+    (cd "$TEST_DIR" && sh "$TEST_DIR/sb-launcher")
+    [ "$(cat "$TEST_MENU_LOG")" = "$LITERAL_TARGET/menu.sh" ] || fail 'launcher changed or executed a literal source path'
+    [ ! -e "$TEST_DIR/SHOULD_NOT_RUN" ] || fail 'source directory punctuation was interpreted as shell code'
+done
+cp "$TEST_DIR/sb-launcher" "$TEST_DIR/launcher-before"
+CONTROL_TARGET=$TEST_DIR/$'invalid\nsource'
+mkdir "$CONTROL_TARGET"
+ln -s "$CONTROL_TARGET" "$TEST_DIR/control-source-alias"
+for unsafe_target in "$CONTROL_TARGET" "$TEST_DIR/control-source-alias" "$TEST_DIR/"$'invalid\rsource' "$TEST_DIR/"$'invalid\tsource'; do
     if PATH="$TEST_DIR/bin:$PATH" SB_INSTALL_SOURCE_DIR="$unsafe_target" \
         sh "$TEST_DIR/bootstrap.sh" --source "$BOOT_SOURCE" --no-menu > "$TEST_DIR/unsafe-target.log" 2>&1; then
-        fail 'shell metacharacters in canonical launcher target accepted'
+        fail 'control characters in a source directory were accepted'
     fi
     cmp "$TEST_DIR/launcher-before" "$TEST_DIR/sb-launcher" || fail 'rejected target modified launcher'
 done

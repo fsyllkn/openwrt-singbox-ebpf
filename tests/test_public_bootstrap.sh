@@ -23,14 +23,29 @@ public_url = 'https://github.com/fsyllkn/openwrt-singbox-ebpf/archive/refs/heads
 
 with tempfile.TemporaryDirectory(prefix='sb-public-bootstrap-') as directory:
     root = Path(directory)
+    os.chdir(root)
     tools = root / 'tools'
     tools.mkdir()
+    launcher = root / 'sb-launcher'
+    def isolated_bootstrap(text):
+        # Even a regressed fixed-directory implementation must stay inside this
+        # fixture. Actual in-place updates also unpack this isolated script.
+        return (text.replace('/etc/openwrt_release', str(root / 'openwrt_release'))
+                    .replace('/usr/bin/sb', str(launcher))
+                    .replace('/overlay/openwrt-singbox-ebpf', str(root / 'wrong-overlay-source'))
+                    .replace('/root/openwrt-singbox-ebpf', str(root / 'wrong-root-source')))
     archive_source = root / 'public-source'
     for name in ('scripts', 'openwrt', 'config', 'providers', 'examples'):
         (archive_source / name).mkdir(parents=True)
     for name in ('quick-install.sh', 'install.sh', 'uninstall.sh', 'README.md'):
         shutil.copyfile(base / name, archive_source / name)
-    (archive_source / 'menu.sh').write_text('#!/bin/sh\nexit 0\n')
+    (archive_source / 'quick-install.sh').write_text(isolated_bootstrap(source))
+    (archive_source / 'menu.sh').write_text('''#!/bin/sh
+if [ -n "${BOOT_MENU_LOG:-}" ]; then
+    printf '%s\\n' "$0" "$@" > "$BOOT_MENU_LOG"
+fi
+exit 0
+''')
     for name in ('sbctl', 'runtime-paths.sh', 'terminal-input.sh', 'download.sh', 'configure-download.sh', 'config-parts-lib.sh', 'config-parts.sh', 'route-manager.sh', 'gateway.sh', 'dns-guard.sh', 'update-core.sh'):
         shutil.copyfile(base / 'scripts' / name, archive_source / 'scripts' / name)
     shutil.copyfile(base / 'openwrt/sing-box.init', archive_source / 'openwrt/sing-box.init')
@@ -47,9 +62,8 @@ with tempfile.TemporaryDirectory(prefix='sb-public-bootstrap-') as directory:
     with tarfile.open(archive, 'w:gz') as bundle:
         bundle.add(archive_source, arcname='openwrt-singbox-ebpf-main')
     (root / 'openwrt_release').write_text('fixture\n')
-    launcher = root / 'sb-launcher'
     bootstrap = root / 'bootstrap.sh'
-    bootstrap.write_text(source.replace('/etc/openwrt_release', str(root / 'openwrt_release')).replace('/usr/bin/sb', str(launcher)))
+    bootstrap.write_text(isolated_bootstrap(source))
     (tools / 'id').write_text('#!/bin/sh\n[ "$*" = -u ] || exit 98\nprintf "0\\n"\n')
     (tools / 'uci').write_text('''#!/bin/sh
 if [ "${1:-}" = -c ]; then shift 2; fi
@@ -74,7 +88,7 @@ pathlib.Path(output).write_bytes(pathlib.Path(os.environ['BOOT_ARCHIVE']).read_b
     for tool in tools.iterdir():
         tool.chmod(0o755)
     env = os.environ.copy()
-    for name in ('SB_DOWNLOAD_MODE', 'SB_HTTP_PROXY', 'SB_GITHUB_PROXY'):
+    for name in ('SB_DOWNLOAD_MODE', 'SB_HTTP_PROXY', 'SB_GITHUB_PROXY', 'SB_INSTALL_SOURCE_DIR'):
         env.pop(name, None)
     env.update(PATH=str(tools) + os.pathsep + env['PATH'], BOOT_ARCHIVE=str(archive), BOOT_DOWNLOAD_LOG=str(root / 'download-log'), SB_DOWNLOAD_UCI_DIR=str(root / 'uci'),
                http_proxy='http://environment.invalid:8080', https_proxy='http://environment.invalid:8080', all_proxy='http://environment.invalid:8080',
@@ -176,6 +190,155 @@ pathlib.Path(output).write_bytes(pathlib.Path(os.environ['BOOT_ARCHIVE']).read_b
         assert (legacy / 'examples' / (provider + '.sample.json')).is_file(), 'Previous whitelist lost required sample'
         assert not (legacy / 'providers' / (provider + '.json')).exists(), 'Previous whitelist imported a runtime provider'
     print('PASS compatibility with the previous published bootstrap whitelist')
+
+    # Exercise real source-script invocation, not only the external bootstrap
+    # with SB_INSTALL_SOURCE_DIR preselected. A downloaded/cloned project must
+    # stay where the user put it, regardless of the SSH working directory.
+    auto_env = dict(env, SB_DOWNLOAD_MODE='invalid-offline-settings')
+    unrelated = root / 'unrelated working directory'
+    unrelated.mkdir()
+    def make_checkout(name):
+        checkout = root / name
+        shutil.copytree(archive_source, checkout)
+        return checkout
+    def run_auto(script, flags=(), *, cwd=unrelated, current=None):
+        (root / 'download-log').unlink(missing_ok=True)
+        return subprocess.run(['sh', str(script), '--no-menu', *flags],
+                              cwd=cwd, env=current or auto_env, capture_output=True, text=True)
+    def assert_launcher(checkout):
+        menu_log = root / 'auto-menu-log'
+        result = subprocess.run(['sh', str(launcher), '--literal', 'value with spaces'],
+                                cwd=root, env=dict(env, BOOT_MENU_LOG=str(menu_log)),
+                                capture_output=True, text=True)
+        assert result.returncode == 0, f'Launcher failed: {result.stderr}'
+        assert menu_log.read_text().splitlines() == [str(checkout / 'menu.sh'), '--literal', 'value with spaces'], 'Launcher selected another source or changed arguments'
+        assert not (root / 'PWNED').exists() and not (root / 'BACKTICK').exists(), 'Source path was interpreted as shell code'
+    actual = make_checkout("用户选择的 源码 'quoted' $HOME $(touch PWNED) `touch BACKTICK`; directory")
+    result = run_auto(actual / 'quick-install.sh')
+    assert result.returncode == 0, f'Actual source directory was not reused: {result.stderr}'
+    assert not (root / 'download-log').exists(), 'Existing source unexpectedly downloaded another copy'
+    assert (actual / 'providers/local.json').read_bytes() == (archive_source / 'providers/local.json').read_bytes(), 'In-place setup changed a private source file'
+    assert_launcher(actual)
+    assert not (unrelated / 'openwrt-singbox-ebpf').exists(), 'Script-relative source was relocated to cwd'
+    print('PASS actual arbitrary source location and literal Unicode/shell characters')
+
+    other = make_checkout('another complete source')
+    result = run_auto(actual / 'quick-install.sh', cwd=other)
+    assert result.returncode == 0 and not (root / 'download-log').exists(), 'Script source did not take precedence over another checkout in cwd'
+    assert_launcher(actual)
+    script_alias = root / 'quick-install-link.sh'
+    script_alias.symlink_to(actual / 'quick-install.sh')
+    result = run_auto(script_alias)
+    assert result.returncode == 0, f'Script symlink did not resolve to its source: {result.stderr}'
+    assert_launcher(actual)
+    result = run_auto(bootstrap, cwd=other)
+    assert result.returncode == 0 and not (root / 'download-log').exists(), 'Standalone bootstrap ignored a complete source in cwd'
+    assert_launcher(other)
+    result = run_auto(actual / 'quick-install.sh', ['--source', '../another complete source'])
+    assert result.returncode == 0 and not (root / 'download-log').exists(), 'Explicit local source did not override script directory in place'
+    assert_launcher(other)
+    assert not (other / 'openwrt-singbox-ebpf').exists(), 'Explicit local source was nested instead of reused'
+    print('PASS script, cwd, symlink and explicit local-source priorities')
+
+    moved = root / 'explicit destination'
+    result = run_auto(actual / 'quick-install.sh', current=dict(auto_env, SB_INSTALL_SOURCE_DIR=str(moved)))
+    assert result.returncode == 0 and not (root / 'download-log').exists(), 'Explicit source destination was ignored'
+    assert_launcher(moved)
+    assert not (moved / 'providers/local.json').exists(), 'Explicit relocation copied private Provider data'
+    for name, flags in [('online standalone', []), ('offline archive', ['--archive', str(archive)])]:
+        parent = root / name
+        parent.mkdir()
+        current = dict(env, SB_DOWNLOAD_MODE='direct') if not flags else auto_env
+        result = run_auto(bootstrap, flags, cwd=parent, current=current)
+        assert result.returncode == 0, f'{name} did not use caller directory: {result.stderr}'
+        assert_launcher(parent / 'openwrt-singbox-ebpf')
+        assert (root / 'download-log').exists() == (not flags), 'Standalone source preparation used the wrong download behavior'
+    print('PASS explicit destination and standalone caller-directory preparation')
+
+    update_source = make_checkout('self updating source')
+    (update_source / 'README.md').write_text('Old source content\n')
+    old_bootstrap = update_source / 'quick-install.sh'
+    old_text = old_bootstrap.read_text()
+    padding = '# Old bootstrap revision has a different source length.\n' * 5000
+    old_text = old_text.replace('if [ "$SOURCE" != "$TARGET" ]; then\n', padding + 'if [ "$SOURCE" != "$TARGET" ]; then\n', 1)
+    old_text += '\nprintf "old bootstrap completed\\n" > "$BOOT_OLD_COMPLETE"\n'
+    old_bootstrap.write_text(old_text)
+    old_complete = root / 'old-bootstrap-completed'
+    private_before = (update_source / 'providers/local.json').read_bytes()
+    result = run_auto(old_bootstrap, ['--update'], current=dict(env, SB_DOWNLOAD_MODE='direct', BOOT_OLD_COMPLETE=str(old_complete)))
+    assert result.returncode == 0, f'Real in-place source-script update failed: {result.stderr}'
+    assert old_complete.is_file(), 'Updating the running bootstrap skipped its remaining instructions'
+    assert old_bootstrap.read_bytes() == (archive_source / 'quick-install.sh').read_bytes(), 'Old bootstrap source was not replaced by the new version'
+    assert (root / 'download-log').exists(), '--update reused old source without downloading'
+    assert (update_source / 'README.md').read_bytes() == (archive_source / 'README.md').read_bytes(), 'In-place update did not refresh source'
+    assert (update_source / 'providers/local.json').read_bytes() == private_before, 'In-place source update replaced personal Provider data'
+    assert_launcher(update_source)
+    print('PASS actual source script updates itself without relocating private files')
+
+    # Source updates can also be launched from a menu whose interpreter still
+    # has more input to read. Preserve that live inode until the old menu exits.
+    active_menu_source = make_checkout('source with an active menu')
+    active_menu = active_menu_source / 'menu.sh'
+    active_menu.write_text('#!/bin/sh\n' + padding +
+                          'sh "$BOOT_RUNNING_SOURCE/quick-install.sh" --update --no-menu || exit 1\n' +
+                          padding + 'printf "old menu completed\\n" > "$BOOT_MENU_COMPLETE"\n')
+    menu_complete = root / 'old-menu-completed'
+    result = subprocess.run(['sh', str(active_menu)], cwd=unrelated,
+                            env=dict(env, SB_DOWNLOAD_MODE='direct', BOOT_RUNNING_SOURCE=str(active_menu_source),
+                                     BOOT_MENU_COMPLETE=str(menu_complete)), capture_output=True, text=True)
+    assert result.returncode == 0 and menu_complete.is_file(), f'Source update interrupted its active parent menu: {result.stderr}'
+    assert active_menu.read_bytes() == (archive_source / 'menu.sh').read_bytes(), 'Active menu source was not replaced by the new version'
+    assert_launcher(active_menu_source)
+    print('PASS active old menu finishes after its source file is updated')
+
+    for kind in ('directory', 'file', 'symlink'):
+        checkout = make_checkout('git source ' + kind)
+        git_path = checkout / '.git'
+        if kind == 'directory':
+            git_path.mkdir()
+        elif kind == 'file':
+            git_path.write_text('gitdir: ../worktree-data\n')
+        else:
+            git_path.symlink_to(root / 'missing-git-data')
+        result = run_auto(checkout / 'quick-install.sh')
+        assert result.returncode == 0, f'Git {kind} checkout could not register in place: {result.stderr}'
+        assert_launcher(checkout)
+        launcher_before = launcher.read_bytes()
+        readme_before = (checkout / 'README.md').read_bytes()
+        for flags in (['--update'], ['--archive', str(archive)]):
+            result = run_auto(checkout / 'quick-install.sh', flags, current=dict(env, SB_DOWNLOAD_MODE='direct'))
+            assert result.returncode != 0 and 'Refusing to overwrite Git checkout' in result.stderr, f'Git {kind} was not protected'
+            assert not (root / 'download-log').exists(), 'Git checkout refusal occurred after network access'
+            assert launcher.read_bytes() == launcher_before and (checkout / 'README.md').read_bytes() == readme_before, 'Rejected Git update changed existing files'
+    print('PASS Git directory, worktree file and symlink protection before download')
+
+    launcher_before = launcher.read_bytes()
+    for control in ('\n', '\r', '\t', '\x1b'):
+        bad_target = root / ('invalid' + control + 'source')
+        result = run_auto(bootstrap, ['--source', str(other)], current=dict(auto_env, SB_INSTALL_SOURCE_DIR=str(bad_target)))
+        assert result.returncode != 0 and not bad_target.exists(), 'Control-character source path was accepted'
+        assert launcher.read_bytes() == launcher_before, 'Rejected path changed the existing launcher'
+    control_prefix = make_checkout('control-prefix')
+    trailing_newline = make_checkout('control-prefix\n')
+    control_alias = root / 'source-control-alias'
+    control_alias.symlink_to(trailing_newline, target_is_directory=True)
+    for flags, cwd, current in (
+        (['--source', str(trailing_newline)], unrelated, auto_env),
+        ([], trailing_newline, auto_env),
+        (['--source', str(other)], unrelated, dict(auto_env, SB_INSTALL_SOURCE_DIR=str(control_alias))),
+    ):
+        result = run_auto(bootstrap, flags, cwd=cwd, current=current)
+        assert result.returncode != 0, 'Canonicalization stripped a control character and selected another source'
+        assert launcher.read_bytes() == launcher_before, 'Invalid canonical source changed the existing launcher'
+        assert not (root / 'download-log').exists(), 'Invalid canonical source triggered a download'
+    invalid_script_alias = root / 'invalid-source-script-link.sh'
+    invalid_script_alias.symlink_to(trailing_newline / 'quick-install.sh')
+    for script in (trailing_newline / 'quick-install.sh', invalid_script_alias):
+        result = run_auto(script)
+        assert result.returncode != 0 and launcher.read_bytes() == launcher_before, 'Script path canonicalization selected a different source after stripping controls'
+        assert not (root / 'download-log').exists(), 'Invalid script source triggered a download'
+    assert not (root / 'wrong-overlay-source').exists() and not (root / 'wrong-root-source').exists(), 'Bootstrap retained a fixed system source directory'
+    print('PASS control-character path rejection without changing the launcher')
 
     for flags in (['--http-proxy', 'http://bad.invalid:8080\nnew-line'], ['--direct', '--github-proxy', 'https://accelerator.example.invalid/']):
         bad_target = root / 'rejected-target'

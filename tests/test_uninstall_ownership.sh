@@ -7,7 +7,7 @@ trap 'rm -rf "$TEST_DIR"' EXIT HUP INT TERM
 fail() { printf 'FAILED: %s\n' "$*" >&2; exit 1; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 awk '
-  /^(validate_purge_target|remove_owned_sbctl_link|restore_managed_network)\(\) \{/ { emit = 1 }
+  /^(validate_purge_target|remove_owned_sbctl_link|quote_shell_path|remove_owned_sb_launcher|restore_managed_network)\(\) \{/ { emit = 1 }
   emit { print }
   emit && /^}$/ { emit = 0 }
 ' "$BASE/uninstall.sh" > "$TEST_DIR/functions.sh"
@@ -39,6 +39,75 @@ remove_owned_sbctl_link "$TEST_DIR/links/regular"
 [ ! -L "$TEST_DIR/links/owned" ] || fail 'owned CLI symlink retained'
 [ -L "$TEST_DIR/links/foreign" ] || fail 'foreign CLI symlink removed'
 [ -f "$TEST_DIR/links/regular" ] || fail 'foreign regular CLI removed'
+
+# Recognize only complete generated launchers, with source and service paths
+# treated as literal data. This includes old double-quoted launchers while
+# supporting the POSIX quoting used by bootstrap for arbitrary clone paths.
+(
+    source_dir=$TEST_DIR/source
+    fixture_launcher=$TEST_DIR/links/sb
+    side_effect=$TEST_DIR/launcher-was-executed
+    for path_shape in ordinary spaces unicode punctuation; do
+        case "$path_shape" in
+            ordinary) path_suffix=checkout ;;
+            spaces) path_suffix='clone folder with spaces' ;;
+            unicode) path_suffix='中文 源码目录' ;;
+            punctuation) path_suffix='quoted'\'' $(touch "$SIDE_EFFECT") `touch "$SIDE_EFFECT"` $HOME "literal" \ path' ;;
+        esac
+        INSTALL_DIR=$TEST_DIR/runtime/$path_suffix
+        source_dir=$TEST_DIR/source/$path_suffix
+        SIDE_EFFECT=$side_effect
+        export SIDE_EFFECT
+        for kind in source installed; do
+            case "$kind" in
+                source) menu_path=$source_dir/menu.sh ;;
+                installed) menu_path=$INSTALL_DIR/scripts/menu.sh ;;
+            esac
+            for style in legacy literal; do
+                # Build fixtures independently of the production quote helper.
+                python3 - "$fixture_launcher" "$menu_path" "$style" <<'PY'
+from pathlib import Path
+import sys
+launcher, path, style = sys.argv[1:]
+argument = '"' + path + '"' if style == 'legacy' else "'" + path.replace("'", "'\\''") + "'"
+Path(launcher).write_text('#!/bin/sh\nexec /bin/sh ' + argument + ' "$@"\n')
+PY
+                remove_owned_sb_launcher "$fixture_launcher" "$source_dir"
+                [ ! -e "$fixture_launcher" ] || fail "$path_shape $kind $style owned launcher retained"
+                [ ! -e "$side_effect" ] || fail 'launcher content or path was executed during ownership check'
+            done
+        done
+    done
+
+    INSTALL_DIR=$TEST_DIR/installation
+    source_dir=$TEST_DIR/source
+    printf '#!/bin/sh\nexec /bin/sh "%s/scripts/menu.sh" "$@"\n' "$INSTALL_DIR" > "$fixture_launcher"
+    cp "$fixture_launcher" "$TEST_DIR/owned-launcher-target"
+    ln -s "$TEST_DIR/owned-launcher-target" "$TEST_DIR/links/sb-symlink"
+    remove_owned_sb_launcher "$TEST_DIR/links/sb-symlink" "$source_dir"
+    [ -L "$TEST_DIR/links/sb-symlink" ] || fail 'symlink launcher removed'
+    [ -f "$TEST_DIR/owned-launcher-target" ] || fail 'symlink launcher target changed'
+
+    for kind in mentioned extra_command foreign_path no_shebang; do
+        case "$kind" in
+            mentioned)
+                printf '#!/bin/sh\n# Saved old command: exec /bin/sh "%s/scripts/menu.sh" "$@"\nexec /bin/sh /another/application\n' "$INSTALL_DIR" > "$fixture_launcher" ;;
+            extra_command)
+                printf '#!/bin/sh\nexec /bin/sh "%s/scripts/menu.sh" "$@"\nprintf extra\\n\n' "$INSTALL_DIR" > "$fixture_launcher" ;;
+            foreign_path)
+                printf '#!/bin/sh\nexec /bin/sh '\''/another/application/menu.sh'\'' "$@"\n' > "$fixture_launcher" ;;
+            no_shebang)
+                printf 'exec /bin/sh "%s/scripts/menu.sh" "$@"\n' "$INSTALL_DIR" > "$fixture_launcher" ;;
+        esac
+        cp "$fixture_launcher" "$TEST_DIR/launcher-before"
+        remove_owned_sb_launcher "$fixture_launcher" "$source_dir"
+        cmp "$TEST_DIR/launcher-before" "$fixture_launcher" || fail "$kind unrelated launcher changed"
+    done
+    printf '#!/bin/sh\nexec /bin/sh "/menu.sh" "$@"\n' > "$fixture_launcher"
+    remove_owned_sb_launcher "$fixture_launcher" ''
+    [ -f "$fixture_launcher" ] || fail 'empty source matched an unrelated root launcher'
+    [ ! -e "$side_effect" ] || fail 'ownership check evaluated a path'
+)
 
 TEST_EVENTS=$TEST_DIR/events; export TEST_EVENTS
 cat > "$INSTALL_DIR/scripts/gateway.sh" <<'SH'

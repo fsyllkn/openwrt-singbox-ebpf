@@ -290,11 +290,13 @@ usage() {
 Usage: sh quick-install.sh [--archive FILE|--source DIRECTORY] [--update] [--no-menu]
                           [--direct|--http-proxy URL|--github-proxy PREFIX]
 
-Default: use an existing local source tree, or download the public main branch
-from fsyllkn/openwrt-singbox-ebpf. No Git required.
+Default: reuse the source tree beside this script or in the current directory.
+Otherwise download the public main branch into ./openwrt-singbox-ebpf.
+SB_INSTALL_SOURCE_DIR can explicitly select an absolute destination. No Git required.
 --archive: use an already-downloaded branch archive completely offline.
            ZIP requires unzip; tar.gz only needs tar.
---source:  copy the project source tree from a local directory.
+--source:  use a local source directory in place, or copy it to an explicit
+           SB_INSTALL_SOURCE_DIR destination.
 --update:  refresh managed source files without touching installed services.
 --no-menu: return after preparing source and registering the sb shortcut.
 --direct: no project proxy override; standard system proxy environment remains.
@@ -306,24 +308,33 @@ EOF
 [ "$(id -u)" -eq 0 ] || error 'Run as root.'
 [ -f /etc/openwrt_release ] || error 'This distribution requires OpenWrt/procd.'
 
-if [ -d /overlay ]; then
-    BASE=/overlay/openwrt-singbox-ebpf
-else
-    BASE=/root/openwrt-singbox-ebpf
-fi
-TARGET=${SB_INSTALL_SOURCE_DIR:-$BASE}
+validate_source_path() {
+    # Source records use one literal path per line. Other characters, including
+    # Unicode and shell punctuation, are safe because the launcher quotes them.
+    [ "$(printf '%s' "$1" | LC_ALL=C tr -d '[:cntrl:]')" = "$1" ] ||
+        error 'Source directory must not contain control characters or line breaks.'
+}
 validate_source_target() {
     case "$1" in
         /*) ;;
         *) error 'SB_INSTALL_SOURCE_DIR must be an absolute directory.' ;;
     esac
-    # Spaces are supported by every copy/launcher path. Reject shell expansion
-    # characters because the launcher embeds this directory in double quotes.
-    case "$1" in
-        *[!a-zA-Z0-9_./\ -]*) error 'Source directory may contain letters, digits, spaces and _ . / - only.' ;;
-    esac
+    validate_source_path "$1"
 }
-validate_source_target "$TARGET"
+resolve_source_directory() (
+    validate_source_path "$1"
+    CDPATH= cd -- "$1" || exit 1
+    # The sentinel prevents command substitution from stripping a directory's
+    # trailing newline before we can reject it as an invalid source record.
+    resolved_source_dir=$(pwd -P && printf '.') || exit 1
+    resolved_source_dir=${resolved_source_dir%.}
+    resolved_source_dir=${resolved_source_dir%?}
+    validate_source_path "$resolved_source_dir"
+    printf '%s\n' "$resolved_source_dir"
+)
+quote_shell_path() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
 
 ARCHIVE=
 SOURCE=
@@ -406,6 +417,17 @@ copy_source_sample() (
     if ln -T "$sample_stage" "$sample_target" 2>/dev/null; then exit 0; fi
     [ -e "$sample_target" ] || [ -L "$sample_target" ] || error "Cannot deploy missing provider sample: $sample_target"
 )
+copy_managed_source_file() (
+    managed_source=$1
+    managed_target=$2
+    managed_stage=$(mktemp "${managed_target}.update.XXXXXX") || error 'Cannot stage source update.'
+    trap 'rm -f "$managed_stage"' EXIT HUP INT TERM
+    # A source menu or this bootstrap may still be executing the old inode.
+    # Replacing its contents with cp can invalidate the interpreter's read
+    # offset when versions differ in length. Rename the complete new file.
+    cp -p "$managed_source" "$managed_stage" && mv -f "$managed_stage" "$managed_target" ||
+        error "Failed copying $(basename "$managed_source")"
+)
 download_archive() {
     dest=$1
     url=https://github.com/fsyllkn/openwrt-singbox-ebpf/archive/refs/heads/main.tar.gz
@@ -437,7 +459,38 @@ unpack_archive() {
     SOURCE=$FOUND
 }
 
-SELF=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || error 'Cannot resolve script directory.'
+validate_source_path "$0"
+if SCRIPT_FILE=$(readlink -f "$0" 2>/dev/null && printf '.'); then
+    SCRIPT_FILE=${SCRIPT_FILE%.}
+    SCRIPT_FILE=${SCRIPT_FILE%?}
+else
+    SCRIPT_FILE=$0
+fi
+validate_source_path "$SCRIPT_FILE"
+SELF=$(resolve_source_directory "$(dirname -- "$SCRIPT_FILE")") || error 'Cannot resolve script directory.'
+CALLER_DIR=$(resolve_source_directory .) || error 'Cannot resolve current directory.'
+if [ -n "$SOURCE" ]; then
+    validate_source_path "$SOURCE"
+    validate_source "$SOURCE" || error "Invalid OpenWrt source: $SOURCE"
+    SOURCE=$(resolve_source_directory "$SOURCE") || error 'Cannot resolve source directory.'
+fi
+if [ -n "${SB_INSTALL_SOURCE_DIR:-}" ]; then
+    TARGET=$SB_INSTALL_SOURCE_DIR
+elif [ -n "$SOURCE" ]; then
+    TARGET=$SOURCE
+elif validate_source "$SELF"; then
+    TARGET=$SELF
+elif validate_source "$CALLER_DIR"; then
+    TARGET=$CALLER_DIR
+else
+    TARGET=${CALLER_DIR%/}/openwrt-singbox-ebpf
+fi
+validate_source_target "$TARGET"
+if [ -d "$TARGET" ]; then
+    TARGET=$(resolve_source_directory "$TARGET") || error 'Cannot resolve target directory.'
+fi
+validate_source_target "$TARGET"
+
 # Without explicit inputs, opening sb or rerunning this file uses local
 # source. --update instead fetches a fresh archive unless it is supplied.
 if [ -z "$SOURCE" ] && [ -z "$ARCHIVE" ] && [ "$UPDATE" -eq 0 ]; then
@@ -445,7 +498,17 @@ if [ -z "$SOURCE" ] && [ -z "$ARCHIVE" ] && [ "$UPDATE" -eq 0 ]; then
         SOURCE=$TARGET
     elif validate_source "$SELF"; then
         SOURCE=$SELF
+    elif validate_source "$CALLER_DIR"; then
+        SOURCE=$CALLER_DIR
     fi
+fi
+
+# Git worktrees use a .git directory, file, or symlink. Registering the selected
+# checkout in place is fine; archive updates and relocation must never replace
+# it, and can be rejected before downloading anything.
+if [ -e "$TARGET/.git" ] || [ -L "$TARGET/.git" ]; then
+    [ -z "$ARCHIVE" ] && [ -n "$SOURCE" ] && [ "$SOURCE" = "$TARGET" ] ||
+        error "Refusing to overwrite Git checkout: $TARGET (use git pull on its current branch)."
 fi
 
 if [ -n "$ARCHIVE" ] || [ -z "$SOURCE" ]; then
@@ -457,14 +520,14 @@ if [ -n "$ARCHIVE" ] || [ -z "$SOURCE" ]; then
     unpack_archive "$ARCHIVE" "$TMP"
 fi
 validate_source "$SOURCE" || error "Invalid OpenWrt source: $SOURCE"
-SOURCE=$(CDPATH= cd -- "$SOURCE" && pwd -P) || error 'Cannot resolve source directory.'
+SOURCE=$(resolve_source_directory "$SOURCE") || error 'Cannot resolve source directory.'
 if [ -d "$TARGET" ]; then
-    TARGET=$(CDPATH= cd -- "$TARGET" && pwd -P) || error 'Cannot resolve target directory.'
+    TARGET=$(resolve_source_directory "$TARGET") || error 'Cannot resolve target directory.'
 fi
 validate_source_target "$TARGET"
 
 if [ "$SOURCE" != "$TARGET" ]; then
-    [ ! -d "$TARGET/.git" ] ||
+    { [ ! -e "$TARGET/.git" ] && [ ! -L "$TARGET/.git" ]; } ||
         error "Refusing to overwrite Git checkout: $TARGET (use git pull on its current branch)."
     if [ -d "$TARGET" ] && [ ! -f "$TARGET/menu.sh" ]; then
         error "Target exists but is not an installed OpenWrt source: $TARGET"
@@ -474,7 +537,7 @@ if [ "$SOURCE" != "$TARGET" ]; then
     # Whitelist only operational OpenWrt source files; never copy the
     # repository's real config.json or subscription/provider private data.
     for file in README.md quick-install.sh install.sh menu.sh uninstall.sh; do
-        cp "$SOURCE/$file" "$TARGET/$file" || error "Failed copying $file"
+        copy_managed_source_file "$SOURCE/$file" "$TARGET/$file"
     done
     for file in "$SOURCE"/scripts/*; do
         [ -f "$file" ] || continue
@@ -513,7 +576,7 @@ if [ -e /usr/bin/sb ] || [ -L /usr/bin/sb ]; then
     grep -Fq '/menu.sh' /usr/bin/sb 2>/dev/null ||
         error '/usr/bin/sb belongs to another application.'
 fi
-printf '#!/bin/sh\nexec /bin/sh "%s/menu.sh" "$@"\n' "$TARGET" > /usr/bin/sb ||
+printf '#!/bin/sh\nexec /bin/sh %s "$@"\n' "$(quote_shell_path "$TARGET/menu.sh")" > /usr/bin/sb ||
     error 'Could not register sb launcher.'
 chmod 0755 /usr/bin/sb
 info "SSH shortcut: sb (source: $TARGET)"

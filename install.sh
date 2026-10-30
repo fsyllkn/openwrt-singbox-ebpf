@@ -13,7 +13,11 @@
 # =============================================================================
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INSTALL_SOURCE_FILE="$(readlink -f -- "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
+REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$INSTALL_SOURCE_FILE")" && pwd -P)"
+case "$REPO_ROOT" in
+    *[[:cntrl:]]*) printf '%s\n' 'Source directory must not contain control characters.' >&2; exit 1 ;;
+esac
 . "$REPO_ROOT/scripts/runtime-paths.sh"
 sb_load_paths || exit 1
 . "$REPO_ROOT/scripts/download.sh"
@@ -37,6 +41,12 @@ err()  { echo -e "\033[31m[✗]\033[0m $*" >&2; }
 warn() { echo -e "\033[33m[!]\033[0m $*"; }
 info() { echo -e "\033[36m[ℹ]\033[0m $*"; }
 die()  { err "$*"; exit 1; }
+
+# The source checkout is reused in place, while service files are deployed
+# separately. Reject self-copy before package, core or service changes.
+if [ "$REPO_ROOT" -ef "$INSTALL_DIR" ]; then
+    die "Source checkout and service directory must be different; choose a separate SH_SINGBOX_HOME."
+fi
 
 record_source_directory() {
     local source_record

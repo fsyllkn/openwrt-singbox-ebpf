@@ -35,6 +35,28 @@ remove_owned_sbctl_link() {
     [ "$target" != "$expected" ] || rm -f "$link"
 }
 
+quote_shell_path() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+remove_owned_sb_launcher() {
+    local launcher="$1" source_dir="${2:-}" menu_path quoted_path
+    [ -f "$launcher" ] && [ ! -L "$launcher" ] || return 0
+    # Match the complete generated file as data. A comment mentioning our
+    # path, additional commands, or a symlink is not proof of ownership.
+    for menu_path in "$INSTALL_DIR/scripts/menu.sh" "${source_dir:+$source_dir/menu.sh}"; do
+        case "$menu_path" in /*) ;; *) continue ;; esac
+        [ "$menu_path" = "$(printf '%s' "$menu_path" | LC_ALL=C tr -d '[:cntrl:]')" ] || continue
+        quoted_path=$(quote_shell_path "$menu_path")
+        if printf '#!/bin/sh\nexec /bin/sh %s "$@"\n' "$quoted_path" | cmp -s - "$launcher" ||
+           printf '#!/bin/sh\nexec /bin/sh "%s" "$@"\n' "$menu_path" | cmp -s - "$launcher"; then
+            rm -f -- "$launcher"
+            return 0
+        fi
+    done
+    return 0
+}
+
 restore_managed_network() {
     local failed=0
     if [ -x "$INSTALL_DIR/scripts/gateway.sh" ]; then
@@ -96,12 +118,7 @@ source_dir=$UNINSTALL_DIR
 if [ -r "$INSTALL_DIR/runtime/source-dir" ]; then
     IFS= read -r source_dir < "$INSTALL_DIR/runtime/source-dir" || source_dir=$UNINSTALL_DIR
 fi
-if [ -f /usr/bin/sb ] && [ ! -L /usr/bin/sb ]; then
-    if grep -Fq "\"$INSTALL_DIR/scripts/menu.sh\"" /usr/bin/sb ||
-       { [ -n "$source_dir" ] && grep -Fq "\"$source_dir/menu.sh\"" /usr/bin/sb; }; then
-        rm -f /usr/bin/sb
-    fi
-fi
+remove_owned_sb_launcher /usr/bin/sb "$source_dir"
 ok "Removed owned sb/sbctl launcher files"
 
 # 4. Optional Purge

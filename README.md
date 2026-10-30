@@ -19,11 +19,21 @@
 
 脚本不会自动更换接管模式来绕过固件限制。MIPS、32 位 ARM 等没有本项目已配置的安装包时会提前报错。LAN IPv4 TProxy 不等于已经接管客户端 IPv6；真实转发、DNS 和客户端行为仍需在设备上验证。
 
-## 2. 在线准备源码并打开菜单
+## 2. 获取源码并打开菜单
 
-### 默认下载
+### 已经克隆或解压了仓库
 
-在 OpenWrt SSH 中执行：
+在你实际下载、克隆或解压得到的仓库目录执行：
+
+```sh
+sh ./quick-install.sh
+```
+
+脚本直接使用自己所在的完整源码目录，注册 `sb` 并打开菜单。仓库放在哪个目录，就从哪个目录使用；不会自动复制到另一个预设位置。也可以在其他工作目录通过 `sh '/实际的源码目录/quick-install.sh'` 启动。
+
+### 尚未下载源码：在线引导
+
+先在 OpenWrt SSH 中进入希望保存项目的持久目录，再执行下面的命令。`/tmp/sb-openwrt.sh` 只是临时引导脚本；没有现成仓库时，源码会准备在**当前工作目录的 `openwrt-singbox-ebpf` 子目录**。当前工作目录已经是完整仓库时，则原地使用：
 
 ```sh
 wget -O /tmp/sb-openwrt.sh https://raw.githubusercontent.com/fsyllkn/openwrt-singbox-ebpf/main/quick-install.sh &&
@@ -39,9 +49,19 @@ sh /tmp/sb-openwrt.sh
 
 引导脚本仅准备源码和注册 `sb` 快捷命令，随后打开菜单。进入 **5 安装与更新 → 1 安装/修复核心服务** 才安装依赖、核心及服务。**首次安装不立即启动服务，但会启用开机启动；修复已有安装可能更新核心并重启正在运行的服务。** 重复打开 `sb` 不会自动联网更新。
 
-源码默认放在 `/overlay/openwrt-singbox-ebpf`，没有 `/overlay` 时使用 `/root/openwrt-singbox-ebpf`。可用绝对路径环境变量 `SB_INSTALL_SOURCE_DIR` 指定其他目录，支持普通空格。
+源码位置按实际调用方式确定：
 
-源码目录用于下载和更新项目；服务目录由 `SH_SINGBOX_HOME` 或 UCI 的 `sing-box.main.service_dir` 确定，默认是 `/opt/sing-box`。安装完成后的配置初始化、核心更新使用服务目录 `scripts/` 中的配套工具。菜单和其他工具各自解析本次运行所需的脚本位置，避免继承另一个源码目录的旧路径；源码归档中的 Bash 脚本只需可读，不要求预先添加执行权限。
+| 调用方式 | 使用的源码目录 |
+| --- | --- |
+| 设置了 `SB_INSTALL_SOURCE_DIR` | 使用显式指定的绝对路径作为目标 |
+| 使用 `--source DIRECTORY`，未指定目标 | 原地使用该源码目录 |
+| 运行完整仓库中的 `quick-install.sh` | 使用脚本所在的真实仓库目录 |
+| 运行单独下载的引导脚本，当前目录是完整仓库 | 使用当前仓库目录 |
+| 运行单独的引导脚本，当前目录没有仓库 | 在当前目录下准备 `openwrt-singbox-ebpf` 子目录 |
+
+路径支持中文和空格；在命令中引用路径时请加引号。`SB_INSTALL_SOURCE_DIR` 可用于明确选择另一个目标位置，已有源码通常不需要设置它。`--archive` 和 `--update` 沿用同一套位置选择规则，不另行选择固定目录。
+
+源码目录用于下载和更新项目；服务目录由 `SH_SINGBOX_HOME` 或 UCI 的 `sing-box.main.service_dir` 确定，默认是 `/opt/sing-box`。两者应使用不同目录；安装器会在改动软件包和服务之前拒绝原地自复制。安装完成后的配置初始化、核心更新使用服务目录 `scripts/` 中的配套工具。菜单和其他工具各自解析本次运行所需的脚本位置，避免继承另一个源码目录的旧路径；源码归档中的 Bash 脚本只需可读，不要求预先添加执行权限。
 
 ### 通过本地或局域网 HTTP 代理
 
@@ -80,16 +100,16 @@ sh /tmp/sb-openwrt.sh --direct
 
 ### 离线准备源码
 
-在能下载的电脑上准备本仓库 `main` 分支的 ZIP 或 TAR.GZ，以及单独的 `quick-install.sh`。将两者上传到设备，把引导脚本保存为 `/tmp/sb-openwrt.sh`；例如 ZIP 上传为 `/tmp/openwrt-singbox-ebpf-main.zip` 后执行：
+在能下载的电脑上准备本仓库 `main` 分支的 ZIP 或 TAR.GZ，以及单独的 `quick-install.sh`。将两者上传到设备，把引导脚本保存为 `/tmp/sb-openwrt.sh`；例如 ZIP 上传为 `/tmp/openwrt-singbox-ebpf-main.zip`。进入希望保存源码的持久目录后执行：
 
 ```sh
 sh /tmp/sb-openwrt.sh --archive /tmp/openwrt-singbox-ebpf-main.zip
 ```
 
-ZIP 需要 unzip，TAR.GZ 可直接使用 tar。也可从已上传的源码目录准备：
+ZIP 需要 unzip，TAR.GZ 可直接使用 tar。也可从已经解压的源码目录直接运行 `sh ./quick-install.sh`，或通过单独的引导脚本指定现成源码；未设置另一个目标目录时会原地使用：
 
 ```sh
-sh /path/to/source/quick-install.sh --source /path/to/source
+sh /tmp/sb-openwrt.sh --source '/实际的源码目录'
 ```
 
 这一步只离线准备源码并打开菜单。**完整安装仍需要取得软件包、核心、WebUI 和规则集；上传源码压缩包不等于准备了全部离线安装资源。** 离线准备源码和已有安装的 `--scripts-only` 部署不要求下载代理可用。
@@ -331,6 +351,7 @@ sbctl restart
 | `/opt/sing-box/runtime/gateway.json` | 此设备的 LAN 接口与客户端源网段 |
 | `sing-box.main.service_dir` / `config_file` | UCI 中持久设置的运行目录与配置路径 |
 | `SH_SINGBOX_HOME` / `SH_SINGBOX_CONFIG` | 显式命令环境覆盖，路径必须为绝对路径 |
+| `SB_INSTALL_SOURCE_DIR` | 显式选择源码目标，与服务运行目录设置独立 |
 
 以 `sbctl config` 输出的路径和模式为准。源码配置与运行配置可以是不同文件；更新源码不会自动导入用户配置。要导入自己编辑的完整配置：
 
@@ -348,6 +369,10 @@ sbctl restart
 
 ### SSH 菜单
 
+安装器会记录本次使用的真实源码目录。安装后的 `sb` 优先使用显式 `SB_INSTALL_SOURCE_DIR`、当前源码菜单所在目录，或当前工作目录中的完整仓库，再使用安装时保存的源码记录；不会搜索预设的绝对目录。源码移动或重新下载后，可进入新的仓库目录执行 `sh ./quick-install.sh`，重新注册快捷命令；下一次完整安装或 `--scripts-only` 部署会刷新源码记录。
+
+找不到有效源码时，安装/源码更新会给出实际目录的指定方法，服务管理仍可使用。若显式指定了无效的 `SB_INSTALL_SOURCE_DIR`，会要求修正该路径，不会悄悄更新其他旧仓库。
+
 运行 `sb` → **5 安装与更新 → 2 更新公开仓库源码**：
 
 - **通过引导脚本/压缩包准备的源码目录：** 在离线文件路径处直接回车，按当前代理设置下载公开仓库 `main` 分支；也可填写已上传的 ZIP/TAR.GZ。
@@ -363,7 +388,7 @@ sbctl preflight &&
 sbctl restart
 ```
 
-`/overlay/openwrt-singbox-ebpf` 只是默认源码目录；这里应使用菜单显示的实际目录。`&&` 确保进入目录、部署或预检失败时不会继续执行后续步骤。`--scripts-only` 本身会先检查并备份，再更新脚本、菜单、procd 文件及配套模板；保留用户分片、运行 JSON、Provider、核心和网关设置，不联网、不生成配置、不自动重启。上面最后一条命令才重启服务。部署后重新运行 `sb`，以加载新菜单。
+这里始终使用实际源码目录，不要求目录名称或上级路径固定。`&&` 确保进入目录、部署或预检失败时不会继续执行后续步骤。`--scripts-only` 本身会先检查并备份，再更新脚本、菜单、procd 文件及配套模板；保留用户分片、运行 JSON、Provider、核心和网关设置，不联网、不生成配置、不自动重启。上面最后一条命令才重启服务。部署后重新运行 `sb`，以加载新菜单。
 
 分文件模式下，新模板中的 DNS/基础路由策略在下一次预检或启动时组装，通过校验后才写入生成 JSON；单文件模式不会自动改变 DNS/路由。
 
@@ -387,11 +412,18 @@ sbctl config
 
 ```sh
 cd '/实际的源码目录' &&
-SB_INSTALL_SOURCE_DIR="$PWD" sh ./quick-install.sh --update --no-menu &&
+sh ./quick-install.sh --update --no-menu &&
 bash ./install.sh --scripts-only
 ```
 
 这组命令不重启服务；完成后重新打开 `sb`，需要应用时执行 `sbctl preflight && sbctl restart`。需要本次临时代理时，为引导命令添加 `--http-proxy URL` 或 `--github-proxy PREFIX`。Git 工作树不会被压缩包覆盖；使用菜单的干净工作树检查和 `git pull --ff-only` 流程。
+
+从仍采用旧目录逻辑的版本首次升级时，先按第 2 节下载新版引导脚本到 `/tmp/sb-openwrt.sh`。在实际的非 Git 源码目录执行下面的命令，可由新版引导器完成原地更新和脚本部署：
+
+```sh
+sh /tmp/sb-openwrt.sh --update --no-menu &&
+bash ./install.sh --scripts-only
+```
 
 **5 安装与更新 → 5 更新 reF1nd 内核** 单独更新核心，默认使用项目固定版本（当前为 `v1.15.0-alpha.11-reF1nd`），不是自动追踪 GitHub latest。明确要用其他发行版本时，可执行 `sbctl update-core RELEASE_TAG`，把 `RELEASE_TAG` 替换为目标版本；指定版本也必须能取得并通过对应校验值验证。
 

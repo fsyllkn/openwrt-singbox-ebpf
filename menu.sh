@@ -35,36 +35,43 @@ GATEWAY=$SB_HOME/scripts/gateway.sh
 CONFIG=$SH_SINGBOX_CONFIG
 SERVICE=/etc/init.d/sing-box
 SBCTL=$SB_HOME/scripts/sbctl
+source_directory() (
+    # A source tree has an installer and bootstrap beside its menu. Installed
+    # scripts alone must never become a source-update destination.
+    case "$1" in /*) ;; *) return 1 ;; esac
+    case "$1" in *[[:cntrl:]]*) return 1 ;; esac
+    for source_marker in install.sh quick-install.sh menu.sh scripts/runtime-paths.sh; do
+        [ -f "$1/$source_marker" ] && [ -r "$1/$source_marker" ] || return 1
+    done
+    source_physical=$(CDPATH= cd -- "$1" 2>/dev/null && pwd -P) || return 1
+    case "$source_physical" in *[[:cntrl:]]*) return 1 ;; esac
+    printf '%s\n' "$source_physical"
+)
 find_source_dir() {
     # Source records contain a plain path, never shell code. A copied installed
     # menu must still locate the checkout selected during installation.
     if [ -n "${SB_INSTALL_SOURCE_DIR:-}" ]; then
-        printf '%s\n' "$SB_INSTALL_SOURCE_DIR"
-        return
+        # An explicit but missing directory is an error, not permission to
+        # install or update another checkout from an older source record.
+        source_directory "$SB_INSTALL_SOURCE_DIR"
+        return $?
     fi
-    if [ -f "$MENU_DIR/install.sh" ]; then
-        printf '%s\n' "$MENU_DIR"
-        return
-    fi
+    source_directory "$MENU_DIR" && return 0
+    # Running an installed menu from a complete checkout explicitly selects
+    # that location, including a checkout that was moved since installation.
+    source_directory "$(pwd -P)" && return 0
     recorded_source=
     if [ -r "$SB_HOME/runtime/source-dir" ]; then
         IFS= read -r recorded_source < "$SB_HOME/runtime/source-dir" || recorded_source=
-        case "$recorded_source" in
-            /*) if [ -f "$recorded_source/install.sh" ]; then printf '%s\n' "$recorded_source"; return; fi ;;
-        esac
+        source_directory "$recorded_source" && return 0
     fi
     if command -v uci >/dev/null 2>&1; then
         recorded_source=$(uci -q get sing-box.main.source_dir 2>/dev/null) || recorded_source=
-        case "$recorded_source" in
-            /*) if [ -f "$recorded_source/install.sh" ]; then printf '%s\n' "$recorded_source"; return; fi ;;
-        esac
+        source_directory "$recorded_source" && return 0
     fi
-    for recorded_source in /overlay/openwrt-singbox-ebpf /root/openwrt-singbox-ebpf /overlay/linux_openwrt-sing-box /root/linux_openwrt-sing-box; do
-        if [ -f "$recorded_source/install.sh" ]; then printf '%s\n' "$recorded_source"; return; fi
-    done
-    printf '%s\n' "$MENU_DIR"
+    return 1
 }
-REPO_DIR=$(find_source_dir)
+REPO_DIR=$(find_source_dir) || REPO_DIR=
 [ -f /etc/openwrt_release ] || {
     echo "This distribution requires OpenWrt/procd." >&2
     exit 1
@@ -78,9 +85,22 @@ ask() {
 }
 wait_key() { printf '\n'; sb_read_line unused '按回车继续...'; }
 root_only() { [ "$(id -u)" -eq 0 ] || { say 'Requires root.'; return 1; }; }
+require_source_directory() {
+    if REPO_DIR=$(find_source_dir); then return 0; fi
+    REPO_DIR=
+    say '未找到有效源码目录，安装/源码更新已取消。已安装服务仍可通过其他菜单管理。'
+    if [ -n "${SB_INSTALL_SOURCE_DIR:-}" ]; then
+        say "请检查指定的 SB_INSTALL_SOURCE_DIR：$SB_INSTALL_SOURCE_DIR"
+    fi
+    say '源码已移动或重新下载时，请进入实际源码目录执行 sh ./quick-install.sh，再操作安装或更新。'
+    say '也可使用 SB_INSTALL_SOURCE_DIR=/实际的源码目录 sb 指定现有源码；路径含空格时请加引号。'
+    return 1
+}
 load_download_library() {
-    download_library=$REPO_DIR/scripts/download.sh
-    [ -r "$download_library" ] || download_library=$SB_HOME/scripts/download.sh
+    download_library=$SB_HOME/scripts/download.sh
+    if [ -n "$REPO_DIR" ] && [ -r "$REPO_DIR/scripts/download.sh" ]; then
+        download_library=$REPO_DIR/scripts/download.sh
+    fi
     [ -r "$download_library" ] || {
         say 'Missing download.sh; deploy the complete project scripts.'; return 1;
     }
@@ -202,10 +222,7 @@ install_core() {
         x86_64|amd64|aarch64|arm64) ;;
         *) say 'This reF1nd build supports Linux amd64/arm64. No packages or services were changed.'; return 1 ;;
     esac
-    [ -f "$REPO_DIR/install.sh" ] || {
-        say "Source not available in $REPO_DIR. Download openwrt-singbox-ebpf from its public main branch."
-        return 1
-    }
+    require_source_directory || return
     say 'Installation registers procd and may update packages and the core binary.'
     say 'It does not start the transparent proxy. Existing running sing-box can be affected by a core update.'
     ask 'Install/repair sing-box now?' || return
@@ -376,11 +393,8 @@ diagnose() {
 }
 source_update() {
     root_only || return
-    [ -f "$REPO_DIR/quick-install.sh" ] || {
-        say '一键脚本不存在。请从 openwrt-singbox-ebpf 公开仓库 main 分支下载 quick-install.sh。'
-        return 1
-    }
-    if [ -d "$REPO_DIR/.git" ]; then
+    require_source_directory || return
+    if [ -e "$REPO_DIR/.git" ] || [ -L "$REPO_DIR/.git" ]; then
         command -v git >/dev/null 2>&1 || {
             say '当前目录是 Git 仓库，但设备没有 git。为保护本地工作区，请使用电脑更新仓库后再上传。'
             return 1
@@ -418,8 +432,10 @@ source_update() {
 }
 configure_download_proxy() {
     root_only || return
-    proxy_tool=$REPO_DIR/scripts/configure-download.sh
-    [ -f "$proxy_tool" ] || proxy_tool=$SB_HOME/scripts/configure-download.sh
+    proxy_tool=$SB_HOME/scripts/configure-download.sh
+    if [ -n "$REPO_DIR" ] && [ -f "$REPO_DIR/scripts/configure-download.sh" ]; then
+        proxy_tool=$REPO_DIR/scripts/configure-download.sh
+    fi
     [ -f "$proxy_tool" ] || { say 'Missing configure-download.sh; update the complete project.'; return 1; }
     sh "$proxy_tool" show || true
     say '1) 默认下载（继承系统环境）'
@@ -448,8 +464,10 @@ configure_download_proxy() {
 }
 migrate_config() {
     root_only || return
-    script="$REPO_DIR/scripts/migrate-config.sh"
-    [ -f "$script" ] || script="$SB_HOME/scripts/migrate-config.sh"
+    script="$SB_HOME/scripts/migrate-config.sh"
+    if [ -n "$REPO_DIR" ] && [ -f "$REPO_DIR/scripts/migrate-config.sh" ]; then
+        script="$REPO_DIR/scripts/migrate-config.sh"
+    fi
     [ -f "$script" ] || {
         say '找不到迁移脚本。请先进入「安装与更新 → 更新公开仓库源码」。'
         return 1
@@ -463,7 +481,9 @@ migrate_config() {
 configure_pc_proxy() {
     root_only || return
     script="$SB_HOME/scripts/configure-pc-proxy.sh"
-    [ -f "$script" ] || script="$REPO_DIR/scripts/configure-pc-proxy.sh"
+    if [ ! -f "$script" ] && [ -n "$REPO_DIR" ]; then
+        script="$REPO_DIR/scripts/configure-pc-proxy.sh"
+    fi
     [ -f "$script" ] || { say '未找到 LAN 代理配置脚本，请更新公开仓库并部署配套脚本。'; return 1; }
     say '只允许将代理绑定到本机已有的 RFC1918 LAN IPv4，必须设置账号密码。'
     say '配置更新前会执行 sing-box check，失败则不替换原配置。'
@@ -472,7 +492,9 @@ configure_pc_proxy() {
 disable_pc_proxy() {
     root_only || return
     script="$SB_HOME/scripts/configure-pc-proxy.sh"
-    [ -f "$script" ] || script="$REPO_DIR/scripts/configure-pc-proxy.sh"
+    if [ ! -f "$script" ] && [ -n "$REPO_DIR" ]; then
+        script="$REPO_DIR/scripts/configure-pc-proxy.sh"
+    fi
     [ -f "$script" ] || { say '未找到代理配置脚本。'; return 1; }
     ask '关闭 PC 的 HTTP/SOCKS5 LAN 监听入口？不会立即重启服务。' || return
     /bin/bash "$script" disable
@@ -480,7 +502,9 @@ disable_pc_proxy() {
 apply_pc_privacy() {
     root_only || return
     script="$SB_HOME/scripts/apply-pc-privacy.sh"
-    [ -f "$script" ] || script="$REPO_DIR/scripts/apply-pc-privacy.sh"
+    if [ ! -f "$script" ] && [ -n "$REPO_DIR" ]; then
+        script="$REPO_DIR/scripts/apply-pc-privacy.sh"
+    fi
     [ -f "$script" ] || {
         say '未找到严格隐私策略脚本，请先更新公开仓库源码。'
         return 1
@@ -530,7 +554,9 @@ privacy_audit() {
 align_xtunnel_ebpf() {
     root_only || return
     script="$SB_HOME/scripts/align-xtunnel-ebpf.sh"
-    [ -f "$script" ] || script="$REPO_DIR/scripts/align-xtunnel-ebpf.sh"
+    if [ ! -f "$script" ] && [ -n "$REPO_DIR" ]; then
+        script="$REPO_DIR/scripts/align-xtunnel-ebpf.sh"
+    fi
     [ -f "$script" ] || {
         say '未找到 X-Tunnel UID 适配工具，请先更新 sing-box 公开仓库源码。'
         return 1
@@ -542,7 +568,9 @@ align_xtunnel_ebpf() {
 }
 manage_routes() {
     route_tool=$SB_HOME/scripts/route-manager.sh
-    [ -f "$route_tool" ] || route_tool=$REPO_DIR/scripts/route-manager.sh
+    if [ ! -f "$route_tool" ] && [ -n "$REPO_DIR" ]; then
+        route_tool=$REPO_DIR/scripts/route-manager.sh
+    fi
     [ -f "$route_tool" ] || {
         say '未找到特色路由管理工具。请先更新源码并部署配套脚本。'
         return 1
@@ -560,7 +588,7 @@ uninstall_service() {
     ask '卸载 sing-box 服务并保留现有配置？' || return
     if [ -f "$SB_HOME/uninstall.sh" ]; then
         /bin/bash "$SB_HOME/uninstall.sh"
-    elif [ -f "$REPO_DIR/uninstall.sh" ]; then
+    elif [ -n "$REPO_DIR" ] && [ -f "$REPO_DIR/uninstall.sh" ]; then
         /bin/bash "$REPO_DIR/uninstall.sh"
     else
         say 'Uninstaller missing.'

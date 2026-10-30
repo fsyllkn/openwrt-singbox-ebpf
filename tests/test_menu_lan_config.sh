@@ -4,10 +4,13 @@ set -eu
 BASE=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 TMP=$(mktemp -d /tmp/sb-menu-lan.XXXXXX)
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+# Keep cwd discovery isolated from the real checkout running this suite.
+cd "$TMP"
 mkdir -p "$TMP/bin" "$TMP/checkout/scripts" "$TMP/home/scripts" "$TMP/home/runtime" "$TMP/custom config"
 cp "$BASE/scripts/runtime-paths.sh" "$BASE/scripts/config-parts-lib.sh" "$BASE/scripts/config-parts.sh" "$BASE/scripts/terminal-input.sh" "$TMP/checkout/scripts/"
 cp "$BASE/scripts/runtime-paths.sh" "$BASE/scripts/config-parts-lib.sh" "$BASE/scripts/config-parts.sh" "$BASE/scripts/terminal-input.sh" "$TMP/home/scripts/"
 : > "$TMP/checkout/install.sh"
+: > "$TMP/checkout/quick-install.sh"
 
 # Keep the production path setup/functions intact. Omit only the OS guard and
 # interactive dispatch so the functions can run under sh without a real router.
@@ -23,6 +26,8 @@ case "$1" in
     default) gateway_default_cidr "$2" ;;
     interface) gateway_default_interface ;;
     source) printf '%s\n' "$REPO_DIR" ;;
+    install) install_core ;;
+    service) run_sbctl status ;;
     configure) configure_gateway ;;
     update) source_update ;;
     download)
@@ -163,7 +168,10 @@ cmp "$TMP/override-expected" "$TMP/override-short" || fail 'explicit HOME overri
 # Source checkout discovery works after menu.sh was copied away from checkout.
 mkdir -p "$TMP/recent source" "$TMP/older source" "$TMP/explicit source"
 for source in "$TMP/recent source" "$TMP/older source" "$TMP/explicit source"; do
-    : > "$source/install.sh"
+    mkdir -p "$source/scripts"
+    for marker in install.sh quick-install.sh menu.sh scripts/runtime-paths.sh; do
+        : > "$source/$marker"
+    done
 done
 printf '%s\n' "$TMP/recent source" > "$TMP/home/runtime/source-dir"
 MOCK_UCI_SOURCE=$TMP/older\ source; export MOCK_UCI_SOURCE
@@ -171,6 +179,11 @@ MOCK_UCI_SOURCE=$TMP/older\ source; export MOCK_UCI_SOURCE
 [ "$(sh "$TMP/home/scripts/menu.sh" source)" = "$TMP/recent source" ] || fail 'new scripts-only source record did not override old UCI source'
 [ "$(SB_INSTALL_SOURCE_DIR="$TMP/explicit source" sh "$TMP/checkout/menu.sh" source)" = "$TMP/explicit source" ] || fail 'explicit source did not override checkout'
 [ "$(SB_INSTALL_SOURCE_DIR="$TMP/explicit source" sh "$TMP/home/scripts/menu.sh" source)" = "$TMP/explicit source" ] || fail 'explicit source did not override installed records'
+[ "$(cd "$TMP/older source" && sh "$TMP/checkout/menu.sh" source)" = "$TMP/checkout" ] || fail 'cwd overrode an actual source menu'
+[ "$(cd "$TMP/explicit source" && sh "$TMP/home/scripts/menu.sh" source)" = "$TMP/explicit source" ] || fail 'complete cwd did not override old source records'
+ln -s "$TMP/explicit source" "$TMP/source alias"
+[ "$(SB_INSTALL_SOURCE_DIR="$TMP/source alias" sh "$TMP/home/scripts/menu.sh" source)" = "$TMP/explicit source" ] || fail 'explicit source alias was not canonicalized'
+[ "$(cd "$TMP/source alias" && sh "$TMP/home/scripts/menu.sh" source)" = "$TMP/explicit source" ] || fail 'cwd source alias was not canonicalized'
 printf '%s\n' "$TMP/deleted source" > "$TMP/home/runtime/source-dir"
 [ "$(sh "$TMP/home/scripts/menu.sh" source)" = "$TMP/older source" ] || fail 'stale runtime record prevented UCI fallback'
 printf '%s\n' "$TMP/recent source" > "$TMP/home/runtime/source-dir"
@@ -191,6 +204,56 @@ cmp "$TMP/source-update-expected" "$TMP/source-update-call" || fail 'online upda
 printf '%s\ny\n' "$TMP/offline archive.zip" | sh "$TMP/home/scripts/menu.sh" update > "$TMP/source-update-offline.log"
 printf '%s\n' "$TMP/recent source" --update --archive "$TMP/offline archive.zip" --no-menu > "$TMP/source-update-expected"
 cmp "$TMP/source-update-expected" "$TMP/source-update-call" || fail 'offline update did not target discovered custom checkout'
+
+# Linked Git worktrees use a .git file. They must follow Git's clean/current
+# branch update flow instead of attempting an archive overwrite.
+cat > "$TMP/bin/git" <<'SH'
+#!/bin/sh
+[ "$1" = -C ] && [ "$2" = "$TEST_ROOT/recent source" ] || exit 66
+shift 2
+case "$*" in
+    'symbolic-ref --short HEAD') printf 'main\n' ;;
+    'status --porcelain') : ;;
+    'pull --ff-only') printf '%s\n' "$*" > "$TEST_ROOT/git-update-call" ;;
+    *) exit 66 ;;
+esac
+SH
+chmod 0755 "$TMP/bin/git"
+cp "$BASE/scripts/download.sh" "$TMP/recent source/scripts/download.sh"
+printf 'gitdir: fixture-only\n' > "$TMP/recent source/.git"
+cp "$TMP/source-update-call" "$TMP/source-update-call-before"
+printf 'y\n' | SB_DOWNLOAD_MODE=direct sh "$TMP/home/scripts/menu.sh" update > "$TMP/source-update-git.log"
+grep -Fxq 'pull --ff-only' "$TMP/git-update-call" || fail 'linked Git worktree did not use git pull'
+cmp "$TMP/source-update-call-before" "$TMP/source-update-call" || fail 'Git worktree was passed to archive updater'
+! grep -Fq '离线 ZIP/TAR.GZ' "$TMP/source-update-git.log" || fail 'Git worktree incorrectly requested an archive'
+rm "$TMP/recent source/.git"
+
+# A missing/invalid explicit source never selects an older valid checkout.
+# With no source available the installed menu and controller still operate.
+cat > "$TMP/home/scripts/sbctl" <<'SH'
+#!/bin/sh
+[ "$*" = status ] || exit 66
+printf 'installed-service-status\n'
+SH
+for source in "$TMP/removed source" relative-source "$TMP/home/scripts"; do
+    [ -z "$(SB_INSTALL_SOURCE_DIR="$source" sh "$TMP/home/scripts/menu.sh" source)" ] || fail 'invalid explicit source silently selected another checkout'
+    if SB_INSTALL_SOURCE_DIR="$source" sh "$TMP/home/scripts/menu.sh" update > "$TMP/missing-source.log" 2>&1; then
+        fail 'source update accepted a missing or installed-only source'
+    fi
+    grep -Fq 'sh ./quick-install.sh' "$TMP/missing-source.log" || fail 'missing source recovery did not name the actual-checkout bootstrap'
+    grep -Fq 'SB_INSTALL_SOURCE_DIR=' "$TMP/missing-source.log" || fail 'missing source recovery omitted the explicit override'
+    cmp "$TMP/source-update-call-before" "$TMP/source-update-call" || fail 'missing source launched an updater'
+    [ "$(SB_INSTALL_SOURCE_DIR="$source" sh "$TMP/home/scripts/menu.sh" service)" = installed-service-status ] || fail 'missing source blocked installed service control'
+done
+printf '%s\n' "$TMP/removed source" > "$TMP/home/runtime/source-dir"
+MOCK_UCI_SOURCE=$TMP/removed\ UCI\ source; export MOCK_UCI_SOURCE
+[ -z "$(sh "$TMP/home/scripts/menu.sh" source)" ] || fail 'missing records invented a source location'
+if sh "$TMP/home/scripts/menu.sh" install > "$TMP/missing-source-install.log" 2>&1; then
+    fail 'installation accepted missing source records'
+fi
+grep -Fq '未找到有效源码目录' "$TMP/missing-source-install.log" || fail 'missing source installation error unclear'
+[ "$(sh "$TMP/home/scripts/menu.sh" service)" = installed-service-status ] || fail 'absent source records blocked installed service control'
+printf '%s\n' "$TMP/recent source" > "$TMP/home/runtime/source-dir"
 unset MOCK_UCI_SOURCE
 
 # No fixture below has br-lan: use saved selection, netifd or UCI, then only
@@ -225,6 +288,9 @@ grep -Fxq 'configure lan0 10.23.40.0/23' "$TMP/applied" || fail 'explicit LAN in
 # The new persistent settings menu sends authenticated URLs over stdin and
 # releases temporary SB_* overrides only after a successful explicit choice.
 mkdir -p "$TMP/proxy-source/scripts"
+for marker in install.sh quick-install.sh menu.sh scripts/runtime-paths.sh; do
+    : > "$TMP/proxy-source/$marker"
+done
 cat > "$TMP/proxy-source/scripts/configure-download.sh" <<'SH'
 #!/bin/sh
 case "$1" in
