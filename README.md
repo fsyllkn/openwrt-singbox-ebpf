@@ -120,6 +120,8 @@ GitHub 前缀不用于系统软件源、其他网站、本地 Clash API 或订�
 
 UCI 项为 `sing-box.download.mode`、`sing-box.download.http_proxy`、`sing-box.download.github_proxy`。共享下载工具覆盖源码压缩包、核心压缩包、WebUI 和规则集，不再自动尝试隐藏的第三方下载代理。核心仍按对应版本验证 SHA256；下载失败保留已有完整文件并返回错误。curl 使用总时限；wget 可用 `timeout` 时有总时限，否则使用客户端请求超时。
 
+三份通用配置为内置远程规则集设置了 `initial_path: "geo/<tag>.srs"`。核心没有有效缓存时，首次启动可使用安装器已通过所选代理下载的文件，避免预下载完成后仍必须同步直连 GitHub。核心缓存优先于这份启动备用文件；核心后续远程规则集/订阅的后台刷新仍由运行 JSON 的 `download_detour` 等设置决定，不读取此 UCI 下载设置。需要让后台刷新经过运行中的代理时，请按实际出站配置对应 detour。已有设备配置不会被安装器自动改写。
+
 ## 4. 第一次配置与启动
 
 1. 菜单 **1** 安装/修复核心服务。

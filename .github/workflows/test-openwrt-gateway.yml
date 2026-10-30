@@ -28,6 +28,46 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Verify anonymous public SSH bootstrap and source archive
+        if: github.repository == 'fsyllkn/openwrt-singbox-ebpf' && github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # curl does not read GitHub Actions tokens. No credentials or auth
+          # headers are supplied; -q also prevents a personal curlrc from applying.
+          # Compare immutable URLs with this checkout so concurrent pushes and
+          # reruns of older workflows do not produce false mismatches.
+          curl -q -fL --silent --show-error --connect-timeout 15 --max-time 120 \
+            "https://raw.githubusercontent.com/fsyllkn/openwrt-singbox-ebpf/$GITHUB_SHA/quick-install.sh" \
+            -o "$RUNNER_TEMP/public-quick-install.sh"
+          cmp quick-install.sh "$RUNNER_TEMP/public-quick-install.sh"
+          sh -n "$RUNNER_TEMP/public-quick-install.sh"
+          curl -q -fL --silent --show-error --connect-timeout 15 --max-time 120 \
+            "https://github.com/fsyllkn/openwrt-singbox-ebpf/archive/$GITHUB_SHA.tar.gz" \
+            -o "$RUNNER_TEMP/public-commit.tar.gz"
+          mkdir -p "$RUNNER_TEMP/public-commit"
+          tar -xzf "$RUNNER_TEMP/public-commit.tar.gz" -C "$RUNNER_TEMP/public-commit"
+          archive_root="$RUNNER_TEMP/public-commit/openwrt-singbox-ebpf-$GITHUB_SHA"
+          cmp quick-install.sh "$archive_root/quick-install.sh"
+          cmp config/config.json "$archive_root/config/config.json"
+          test ! -e "$archive_root/providers/xboard.json"
+          echo 'Anonymous public bootstrap and source archive match this checkout.'
+          # Also verify the floating entry points used by the SSH instructions,
+          # without comparing a possibly newer main with this workflow's commit.
+          curl -q -fL --silent --show-error --connect-timeout 15 --max-time 120 \
+            https://raw.githubusercontent.com/fsyllkn/openwrt-singbox-ebpf/main/quick-install.sh \
+            -o "$RUNNER_TEMP/public-main-bootstrap.sh"
+          sh -n "$RUNNER_TEMP/public-main-bootstrap.sh"
+          curl -q -fL --silent --show-error --connect-timeout 15 --max-time 120 \
+            https://github.com/fsyllkn/openwrt-singbox-ebpf/archive/refs/heads/main.tar.gz \
+            -o "$RUNNER_TEMP/public-main.tar.gz"
+          mkdir -p "$RUNNER_TEMP/public-main"
+          tar -xzf "$RUNNER_TEMP/public-main.tar.gz" -C "$RUNNER_TEMP/public-main"
+          main_root="$RUNNER_TEMP/public-main/openwrt-singbox-ebpf-main"
+          sh -n "$main_root/quick-install.sh"
+          test -f "$main_root/config/config.json"
+          test ! -e "$main_root/providers/xboard.json"
+          echo 'Anonymous main bootstrap and source archive are available.'
       - name: Shell syntax
         run: |
           bash -n scripts/gateway.sh

@@ -167,6 +167,26 @@ class PublicSanitizationTests(unittest.TestCase):
             "/runtime/", "/geo/", "/bin/", "/board/",
         )), "Downloaded nodes/assets/runtime state must be ignored.")
 
+    def test_downloaded_rules_are_available_to_first_start(self):
+        updater = (ROOT / "scripts/update-rules.sh").read_text()
+        rule_names = re.findall(r'^\s+"([a-z0-9-]+\.srs)"$', updater, re.MULTILINE)
+        self.assertTrue(bool(rule_names), "Rule downloader publishes no seed files.")
+        for name in ("config/config.json", "config/config.template.json", "examples/lan-private-routing.json"):
+            doc = json.loads((ROOT / name).read_text())
+            self.assertTrue(doc.get("experimental", {}).get("cache_file", {}).get("enabled") is True,
+                            f"{name}: initial_path requires the core cache service.")
+            seeds = set()
+            for item in doc.get("route", {}).get("rule_set", []):
+                if item.get("type") != "remote":
+                    continue
+                seed = item.get("initial_path")
+                self.assertTrue(seed == "geo/" + item["tag"] + ".srs" and "path" not in item,
+                                f"{name}: remote rules do not reference installed seed files.")
+                self.assertTrue(Path(urlsplit(item.get("url", "")).path).name == Path(seed).name,
+                                f"{name}: downloaded resource and startup seed differ.")
+                seeds.add(Path(seed).name)
+            self.assertTrue(seeds == set(rule_names), f"{name}: startup seeds differ from the updater assets.")
+
     @unittest.skipUnless(os.environ.get("SB_PUBLIC_FINGERPRINTS"),
                          "Private fingerprint inventory intentionally stays outside the public repository.")
     def test_external_private_fingerprints(self):

@@ -420,56 +420,64 @@
         "tag": "cnip",
         "format": "binary",
         "url": "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/cnip.srs",
-        "download_detour": "direct"
+        "download_detour": "direct",
+        "initial_path": "geo/cnip.srs"
       },
       {
         "type": "remote",
         "tag": "private",
         "format": "binary",
         "url": "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/private.srs",
-        "download_detour": "direct"
+        "download_detour": "direct",
+        "initial_path": "geo/private.srs"
       },
       {
         "type": "remote",
         "tag": "cn",
         "format": "binary",
         "url": "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/cn.srs",
-        "download_detour": "direct"
+        "download_detour": "direct",
+        "initial_path": "geo/cn.srs"
       },
       {
         "type": "remote",
         "tag": "google-cn",
         "format": "binary",
         "url": "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/google-cn.srs",
-        "download_detour": "direct"
+        "download_detour": "direct",
+        "initial_path": "geo/google-cn.srs"
       },
       {
         "type": "remote",
         "tag": "apple-cn",
         "format": "binary",
         "url": "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/apple-cn.srs",
-        "download_detour": "direct"
+        "download_detour": "direct",
+        "initial_path": "geo/apple-cn.srs"
       },
       {
         "type": "remote",
         "tag": "games-cn",
         "format": "binary",
         "url": "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/games-cn.srs",
-        "download_detour": "direct"
+        "download_detour": "direct",
+        "initial_path": "geo/games-cn.srs"
       },
       {
         "type": "remote",
         "tag": "ads",
         "format": "binary",
         "url": "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/ads.srs",
-        "download_detour": "direct"
+        "download_detour": "direct",
+        "initial_path": "geo/ads.srs"
       },
       {
         "type": "remote",
         "tag": "networktest",
         "format": "binary",
         "url": "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/networktest.srs",
-        "download_detour": "proxy"
+        "download_detour": "proxy",
+        "initial_path": "geo/networktest.srs"
       }
     ]
   },
