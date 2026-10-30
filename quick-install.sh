@@ -1,5 +1,5 @@
 #!/bin/sh
-# Git-free bootstrap for fsyllkn/openwrt-singbox-ebpf (main).
+# Git-free bootstrap for the OpenWrt branch via the public distribution mirror.
 # Download this one file, then use direct/HTTP/GitHub-proxy downloads or an
 # offline source archive. No repository credentials are needed.
 set -eu
@@ -291,7 +291,7 @@ Usage: sh quick-install.sh [--archive FILE|--source DIRECTORY] [--update] [--no-
                           [--direct|--http-proxy URL|--github-proxy PREFIX]
 
 Default: reuse the source tree beside this script or in the current directory.
-Otherwise download the public main branch into ./openwrt-singbox-ebpf.
+Otherwise download the OpenWrt branch distribution mirror into ./openwrt-singbox-ebpf.
 SB_INSTALL_SOURCE_DIR can explicitly select an absolute destination. No Git required.
 --archive: use an already-downloaded branch archive completely offline.
            ZIP requires unzip; tar.gz only needs tar.
@@ -439,7 +439,7 @@ copy_managed_source_file() (
 download_archive() {
     dest=$1
     url=https://github.com/fsyllkn/openwrt-singbox-ebpf/archive/refs/heads/main.tar.gz
-    info 'Downloading public main branch source archive (no Git)...'
+    info 'Downloading OpenWrt branch source archive from public mirror (no Git)...'
     sb_download "$url" "$dest" 180 ||
         error 'Source download failed. Check the selected proxy, or use --archive with a local ZIP/TAR.GZ.'
 }
