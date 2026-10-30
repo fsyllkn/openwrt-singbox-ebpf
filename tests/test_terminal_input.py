@@ -7,12 +7,14 @@ coverage with neither Bash nor stty discoverable. Python is test tooling only.
 
 from __future__ import annotations
 
+import array
 import errno
 import fcntl
 import os
 from pathlib import Path
 import pty
 import select
+import shlex
 import shutil
 import signal
 import subprocess
@@ -45,7 +47,7 @@ if [ "$CONFIG" = caller-config ]; then printf '__CALLER_VARIABLE__ok\n'; fi
 
 class Terminal:
     def __init__(self, shell: list[str], *, backend="auto", secret=False,
-                 expected="", erase=b"\x7f", path=None, mask_stty=False):
+                 expected="", erase=b"\x7f", path=None, mask_stty=False, stty_wrapper=None):
         self.master, self.slave = pty.openpty()
         attributes = termios.tcgetattr(self.slave)
         attributes[6][termios.VERASE] = erase
@@ -63,11 +65,16 @@ class Terminal:
             fcntl.ioctl(self.slave, termios.TIOCSCTTY, 0)
 
         script = SCRIPT
+        assert not (mask_stty and stty_wrapper), "Cannot mask stty and inject a wrapper together"
         if mask_stty:
             # Ubuntu's BusyBox ash can discover standalone applets even with
             # PATH empty. Model OpenWrt's disabled STTY applet explicitly;
             # the real ash shell and its native read builtin remain untouched.
             script = "stty() { return 127; }\nbusybox() { return 127; }\n" + script
+        elif stty_wrapper is not None:
+            # Standalone BusyBox applets may bypass PATH. An explicit shell
+            # function ensures the signal-injection fixture is actually used.
+            script = f"stty() {{ {shlex.quote(str(stty_wrapper.resolve()))} \"$@\"; }}\n" + script
         self.process = subprocess.Popen(shell + ["-c", script, "terminal-input-test", str(HELPER)],
                                         stdin=self.slave, stdout=self.slave, stderr=self.slave,
                                         env=env, preexec_fn=controlling_terminal)
@@ -96,6 +103,38 @@ class Terminal:
 
     def send(self, data: bytes):
         os.write(self.master, data)
+
+    def wait_native_read(self, previous=None, consumed=0):
+        """Wait for the real ash builtin to block after consuming the fixture."""
+        deadline = time.monotonic() + 8
+        while True:
+            attributes = termios.tcgetattr(self.slave)
+            queued = array.array("i", [0])
+            fcntl.ioctl(self.slave, termios.FIONREAD, queued, True)
+            channels = {}
+            pending = [self.process.pid]
+            while pending:
+                pid = pending.pop()
+                try:
+                    proc = Path("/proc") / str(pid)
+                    pending.extend(int(child) for child in (proc / "task" / str(pid) / "children").read_text().split())
+                    channel = (proc / "wchan").read_text().strip()
+                    channels[pid] = channel
+                    if "poll" not in channel:
+                        continue
+                    rchar = next(int(line.partition(":")[2]) for line in (proc / "io").read_text().splitlines()
+                                 if line.startswith("rchar:"))
+                except (FileNotFoundError, ProcessLookupError):
+                    continue
+                if (queued[0] == 0 and attributes[3] & termios.ISIG
+                        and not attributes[3] & (termios.ECHO | termios.ICANON)
+                        and (previous is None or (pid == previous[0] and rchar >= previous[1] + consumed))):
+                    return pid, rchar
+            assert self.process.poll() is None, f"Native reader exited before blocking: {bytes(self.output)!r}"
+            assert time.monotonic() < deadline, (
+                f"Native reader did not reach blocked poll with drained input: queued={queued[0]}, "
+                f"wait_channels={channels}, output={bytes(self.output)!r}")
+            self.read_available(0.01)
 
     def finish(self, *, match=True, success=True):
         deadline = time.monotonic() + 8
@@ -136,11 +175,20 @@ def check(shell, keys: bytes, expected="", *, success=True, backend="auto", secr
         terminal.close()
 
 
-def signal_restore(shell, backend="auto", path=None, mask_stty=False, ctrl_c=False):
-    terminal = Terminal(shell, backend=backend, secret=True, path=path, mask_stty=mask_stty)
+def signal_restore(shell, backend="auto", path=None, mask_stty=False, ctrl_c=False, stty_wrapper=None):
+    terminal = Terminal(shell, backend=backend, secret=True, path=path, mask_stty=mask_stty,
+                        stty_wrapper=stty_wrapper)
     try:
         terminal.until(terminal.prompt)
-        terminal.send(b"signal-private-fixture")
+        # BusyBox prints the native read prompt before applying termios, and
+        # its per-byte read loop has a known signal-before-poll window. Test
+        # interruption of a genuinely blocked read, after actual consumption,
+        # without changing the builtin or using a timing delay/retry.
+        previous = terminal.wait_native_read() if mask_stty else None
+        fixture = b"signal-private-fixture"
+        terminal.send(fixture)
+        if mask_stty:
+            terminal.wait_native_read(previous, len(fixture))
         if ctrl_c:
             # Exercise actual terminal VINTR/ISIG processing, not a simulated
             # byte interpreted by the editor. The entire foreground shell
@@ -164,6 +212,33 @@ def signal_restore(shell, backend="auto", path=None, mask_stty=False, ctrl_c=Fal
             assert terminal.process.returncode != 0 or b"__STATUS__" in terminal.output, terminal.output
     finally:
         terminal.close()
+
+
+def cleanup_hup_restore(shell, directory):
+    """Deliver a second signal while raw-reader cleanup is restoring termios."""
+    directory.mkdir()
+    native_stty = shutil.which("stty")
+    native_dd = shutil.which("dd")
+    assert native_stty and native_dd
+    marker = directory / "cleanup-hup-injected"
+    wrapper = directory / "stty"
+    wrapper.write_text("#!/bin/sh\n"
+                       "if [ \"$#\" -eq 1 ]; then\n"
+                       "    case \"$1\" in *:*)\n"
+                       f"        printf 'cleanup\\n' >> {shlex.quote(str(marker))}\n"
+                       "        kill -HUP 0\n"
+                       "        ;;\n"
+                       "    esac\n"
+                       "fi\n"
+                       f"exec {shlex.quote(native_stty)} \"$@\"\n")
+    wrapper.chmod(0o755)
+    (directory / "dd").symlink_to(native_dd)
+    # Terminal starts a separate session/process group. This signal targets
+    # only its fixture reader and cleanup children, never the test runner.
+    # A session leader dying after TERM can cause precisely this follow-up
+    # HUP. The cleanup command must inherit ignored termination signals.
+    signal_restore(shell, path=directory, stty_wrapper=wrapper)
+    assert marker.read_text() == "cleanup\n", "Restoration did not run exactly once"
 
 
 def non_tty():
@@ -233,6 +308,9 @@ def main():
         signal_restore([BASH])
         print("PASS: no-Bash raw input deletes UTF-8 characters, hides secrets and restores termios on cancellation/signals")
 
+        cleanup_hup_restore([DASH], Path(temporary) / "cleanup-signal-bin")
+        print("PASS: raw terminal restoration survives a second HUP during cleanup")
+
         # Exercise buffered editing locally even when BusyBox is unavailable;
         # this checks our algorithm, not BusyBox's native read implementation.
         empty_path = Path(temporary) / "ash-no-bash-no-stty"
@@ -264,6 +342,8 @@ def main():
             signal_restore(ash, **ash_options)
             signal_restore(ash, ctrl_c=True, **ash_options)
             print("PASS: real BusyBox ash with no Bash/stty supports hidden buffered editing and rejects cancellation/overflow")
+            cleanup_hup_restore(ash, Path(temporary) / "ash-cleanup-signal-bin")
+            print("PASS: real BusyBox ash raw cleanup survives a second HUP during restoration")
         else:
             print("SKIP: real BusyBox ash is unavailable locally; CI requires SB_TEST_BUSYBOX")
 

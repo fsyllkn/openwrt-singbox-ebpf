@@ -131,10 +131,20 @@ _sb_ti_raw() (
     LC_ALL=C; export LC_ALL
     _sb_ti_prompt=$1 _sb_ti_secret=$2 _sb_ti_mode=$3
     _sb_ti_saved=$(_sb_ti_stty -g) || exit 1
-    trap '_sb_ti_stty "$_sb_ti_saved" 2>/dev/null || :' 0
-    trap 'exit 129' HUP
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
+    _sb_ti_restore_terminal() {
+        # TERM can be followed by HUP when the controlling session leader
+        # exits. Protect both this cleanup and its stty child from a second
+        # signal. Calling cleanup directly from each handler also covers a
+        # signal arriving just as the EXIT trap starts. All traps/functions
+        # remain inside this reader subshell, leaving the caller untouched.
+        trap '' HUP INT TERM
+        trap - 0
+        _sb_ti_stty "$_sb_ti_saved" 2>/dev/null || :
+    }
+    trap '_sb_ti_restore_terminal' 0
+    trap '_sb_ti_restore_terminal; exit 129' HUP
+    trap '_sb_ti_restore_terminal; exit 130' INT
+    trap '_sb_ti_restore_terminal; exit 143' TERM
     _sb_ti_stty -echo -icanon -isig -ixon -icrnl -inlcr -igncr min 1 time 0 || exit 1
     _sb_ti_character_constants
     # The mode is ready before the prompt appears, including for secret input.
