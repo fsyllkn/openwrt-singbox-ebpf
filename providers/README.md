@@ -43,6 +43,8 @@
 
 固定内核会给 Provider 节点加标签前缀，例如 `xboard/SAMPLE-XBOARD-REPLACE-ME`。把个人真实节点写入设备上的运行文件后，在控制面板中选择对应的 `xboard/<节点标签>` 或 `local/<节点标签>`；选择结果可由核心缓存恢复。保留静态初始出站，避免在 Provider 加载前把 `default` 指向尚未加入选择器的动态节点。若直接配置了静态真实出站，则可以把 `default` 改为该静态出站标签。
 
+自建 `remote-office`、`remote-home` 等分组时，每个组都需要自己的 `providers` 引用，例如 `"providers": ["local"]`；它不会自动继承 `proxy` 的成员。添加 Provider 引用后，仍需保留已定义的静态初始成员与默认项，再从该组的面板列表选择真实 Provider 节点。仅使用静态节点的分组可以省略 `providers`。
+
 ## HTTP 订阅单独启用
 
 见 [HTTP 订阅片段](../examples/http-provider.sample.json)。这是合并到完整配置中的片段，不是独立运行配置，也不会被默认配置自动加载。

@@ -2,7 +2,7 @@
 
 面向 OpenWrt / iStoreOS 的 reF1nd sing-box 管理脚本，提供 SSH 菜单、procd 服务、本机 eBPF、LAN IPv4 TProxy、认证 HTTP/SOCKS5 入口及自定义目的路由。
 
-**公开仓库：** [fsyllkn/openwrt-singbox-ebpf](https://github.com/fsyllkn/openwrt-singbox-ebpf)，默认分支 `main`。在线安装、源码更新均使用本仓库，无需 GitHub Token，也不要求安装 Git。
+**公开仓库：** [fsyllkn/openwrt-singbox-ebpf](https://github.com/fsyllkn/openwrt-singbox-ebpf)，默认分支 `main`。默认在线安装和压缩包源码更新使用本仓库，无需 GitHub Token，也不要求安装 Git；已有 Git 工作树沿用其配置的远程与分支，见“在线更新”。
 
 本仓库包含通用配置和完整的本地 Provider 样例。**新装可以先启动服务、查看面板和示例节点，再逐项填写自己的上游。** 新装使用分文件配置：用户维护 Provider、入站、出站及路由例外，项目维护 DNS 和基础分流策略。样例没有真实订阅、可用代理节点或内置账号；服务运行中不代表已经具备代理上网能力。已有单文件配置继续可用，不会被自动拆分。
 
@@ -26,18 +26,18 @@
 在 OpenWrt SSH 中执行：
 
 ```sh
-wget -O /tmp/sb-openwrt.sh https://raw.githubusercontent.com/fsyllkn/openwrt-singbox-ebpf/main/quick-install.sh
+wget -O /tmp/sb-openwrt.sh https://raw.githubusercontent.com/fsyllkn/openwrt-singbox-ebpf/main/quick-install.sh &&
 sh /tmp/sb-openwrt.sh
 ```
 
 已有 curl 时也可使用：
 
 ```sh
-curl -fL https://raw.githubusercontent.com/fsyllkn/openwrt-singbox-ebpf/main/quick-install.sh -o /tmp/sb-openwrt.sh
+curl -fL https://raw.githubusercontent.com/fsyllkn/openwrt-singbox-ebpf/main/quick-install.sh -o /tmp/sb-openwrt.sh &&
 sh /tmp/sb-openwrt.sh
 ```
 
-引导脚本仅准备源码和注册 `sb` 快捷命令，随后打开菜单。进入 **安装与更新 → 安装/修复核心服务** 才安装依赖、核心及服务；安装本身不启动透明代理。重复打开 `sb` 不会自动联网更新。
+引导脚本仅准备源码和注册 `sb` 快捷命令，随后打开菜单。进入 **5 安装与更新 → 1 安装/修复核心服务** 才安装依赖、核心及服务。**首次安装不立即启动服务，但会启用开机启动；修复已有安装可能更新核心并重启正在运行的服务。** 重复打开 `sb` 不会自动联网更新。
 
 源码默认放在 `/overlay/openwrt-singbox-ebpf`，没有 `/overlay` 时使用 `/root/openwrt-singbox-ebpf`。可用绝对路径环境变量 `SB_INSTALL_SOURCE_DIR` 指定其他目录，支持普通空格。
 
@@ -49,8 +49,8 @@ sh /tmp/sb-openwrt.sh
 
 ```sh
 download_proxy='http://127.0.0.1:7890'
-http_proxy="$download_proxy" https_proxy="$download_proxy" \
-  curl -fL https://raw.githubusercontent.com/fsyllkn/openwrt-singbox-ebpf/main/quick-install.sh -o /tmp/sb-openwrt.sh
+curl -fL --proxy "$download_proxy" --noproxy '' \
+  https://raw.githubusercontent.com/fsyllkn/openwrt-singbox-ebpf/main/quick-install.sh -o /tmp/sb-openwrt.sh &&
 SB_DOWNLOAD_MODE=http SB_HTTP_PROXY="$download_proxy" sh /tmp/sb-openwrt.sh
 ```
 
@@ -64,11 +64,11 @@ HTTPS 资源经过 HTTP 代理需要客户端支持 CONNECT。脚本优先使用
 
 ```sh
 github_proxy='https://ghfast.top'
-wget -O /tmp/sb-openwrt.sh "$github_proxy/https://raw.githubusercontent.com/fsyllkn/openwrt-singbox-ebpf/main/quick-install.sh"
+wget -O /tmp/sb-openwrt.sh "$github_proxy/https://raw.githubusercontent.com/fsyllkn/openwrt-singbox-ebpf/main/quick-install.sh" &&
 SB_DOWNLOAD_MODE=github SB_GITHUB_PROXY="$github_proxy" sh /tmp/sb-openwrt.sh
 ```
 
-已下载脚本时，可直接传参数：
+已下载脚本时，可直接传参数；以下三条任选一条，不要依次全部执行：
 
 ```sh
 sh /tmp/sb-openwrt.sh --http-proxy http://127.0.0.1:7890
@@ -78,9 +78,9 @@ sh /tmp/sb-openwrt.sh --direct
 
 一次选择一种下载方式。GitHub 下载前缀用于公开的 GitHub 源码和资源，代理服务能够看到这些资源请求；使用可信服务。订阅、运行流量和本地控制 API 不使用此下载前缀。
 
-### 离线安装源码
+### 离线准备源码
 
-上传本仓库 `main` 分支的 ZIP 或 TAR.GZ 后执行：
+在能下载的电脑上准备本仓库 `main` 分支的 ZIP 或 TAR.GZ，以及单独的 `quick-install.sh`。将两者上传到设备，把引导脚本保存为 `/tmp/sb-openwrt.sh`；例如 ZIP 上传为 `/tmp/openwrt-singbox-ebpf-main.zip` 后执行：
 
 ```sh
 sh /tmp/sb-openwrt.sh --archive /tmp/openwrt-singbox-ebpf-main.zip
@@ -92,21 +92,21 @@ ZIP 需要 unzip，TAR.GZ 可直接使用 tar。也可从已上传的源码目�
 sh /path/to/source/quick-install.sh --source /path/to/source
 ```
 
-离线准备和 `--scripts-only` 不要求下载代理可用。
+这一步只离线准备源码并打开菜单。**完整安装仍需要取得软件包、核心、WebUI 和规则集；上传源码压缩包不等于准备了全部离线安装资源。** 离线准备源码和已有安装的 `--scripts-only` 部署不要求下载代理可用。
 
 ## 3. 统一下载代理设置
 
 运行 `sb`，选择 **安装与更新 → 设置下载代理**。可选择默认下载、HTTP 代理、GitHub 下载代理前缀。输入 URL 不回显；保存到 UCI，配置文件权限为 `0600`。设置后，本菜单后续操作使用新设置。
 
-也可使用配置工具：
+也可使用配置工具。下列是独立操作，按需要选择一项执行；路径以默认运行目录为例，自定义目录请相应替换：
 
-```sh
-sh /opt/sing-box/scripts/configure-download.sh show
-sh /opt/sing-box/scripts/configure-download.sh set direct
-sh /opt/sing-box/scripts/configure-download.sh set http http://127.0.0.1:7890
-sh /opt/sing-box/scripts/configure-download.sh set github https://ghfast.top/
-sh /opt/sing-box/scripts/configure-download.sh clear
-```
+| 操作 | 命令 |
+| --- | --- |
+| 查看设置 | `sh /opt/sing-box/scripts/configure-download.sh show` |
+| 使用默认下载 | `sh /opt/sing-box/scripts/configure-download.sh set direct` |
+| 使用 HTTP 代理 | `sh /opt/sing-box/scripts/configure-download.sh set http http://127.0.0.1:7890` |
+| 使用 GitHub 下载前缀 | `sh /opt/sing-box/scripts/configure-download.sh set github https://ghfast.top/` |
+| 清除持久设置 | `sh /opt/sing-box/scripts/configure-download.sh clear` |
 
 安装前工具位于源码的 `scripts/configure-download.sh`。含认证信息的代理优先通过菜单输入，或使用 `set http --stdin`，避免 URL 进入命令历史。状态显示会遮蔽认证信息。
 
@@ -122,17 +122,20 @@ GitHub 前缀不用于系统软件源、其他网站、本地 Clash API 或订�
 
 UCI 项为 `sing-box.download.mode`、`sing-box.download.http_proxy`、`sing-box.download.github_proxy`。共享下载工具覆盖源码压缩包、核心压缩包、WebUI 和规则集，不再自动尝试隐藏的第三方下载代理。核心仍按对应版本验证 SHA256；下载失败保留已有完整文件并返回错误。curl 使用总时限；wget 可用 `timeout` 时有总时限，否则使用客户端请求超时。
 
-三份通用配置为内置远程规则集设置了 `initial_path: "geo/<tag>.srs"`。核心没有有效缓存时，首次启动可使用安装器已通过所选代理下载的文件，避免预下载完成后仍必须同步直连 GitHub。核心缓存优先于这份启动备用文件；核心后续远程规则集/订阅的后台刷新仍由运行 JSON 的 `download_detour` 等设置决定，不读取此 UCI 下载设置。需要让后台刷新经过运行中的代理时，请按实际出站配置对应 detour。已有设备配置不会被安装器自动改写。
+三份通用配置为内置远程规则集设置了 `initial_path: "geo/<tag>.srs"`。核心没有有效缓存时，首次启动可使用安装器已通过所选代理下载的文件，避免预下载完成后仍必须同步直连 GitHub。核心缓存优先于这份启动备用文件。已有单文件配置不会自动添加 `initial_path`；分文件模式的固定 DNS/路由策略随项目模板更新，经配置生成和校验后写入运行 JSON。
+
+核心后台刷新规则集和订阅时，不读取此 UCI 下载设置：Provider 的下载出站可在 `providers.json` 中用 `http_client.detour` 设置；内置远程规则集的 `download_detour` 属于固定路由策略，分文件模式不能通过 `routing.json` 或 `settings.json` 覆盖。需要自定义这些规则集的后台下载出站时，应先切回单文件模式，再修改实际运行配置；不要直接编辑分文件模式的生成 JSON。
 
 ## 4. 第一次配置与启动
 
 ### 先确认服务与面板可以启动
 
-选择 **安装与更新 → 安装/修复核心服务**。没有现有运行配置时，安装器会准备用户配置分文件、生成完整运行 JSON，并初始化两份非空的本地 Provider，不需要先填写订阅 URL。安装仍不自动启动服务；在固件支持相应 eBPF 能力、安装资源齐全后，可以执行：
+选择 **5 安装与更新 → 1 安装/修复核心服务**。全新安装（既无运行 JSON，也无配置分片）时，安装器会准备用户配置分文件、生成完整运行 JSON，并初始化两份非空的本地 Provider，不需要先填写订阅 URL。首次安装不会立即启动服务；在固件支持相应 eBPF 能力、安装资源齐全后，可以执行：
 
 ```sh
-sbctl config
-sbctl preflight && sbctl start
+sbctl config &&
+sbctl preflight &&
+sbctl start &&
 sbctl status
 ```
 
@@ -143,6 +146,8 @@ ssh -L 19090:127.0.0.1:9090 root@OPENWRT_IP
 ```
 
 面板中能看到 `xboard/SAMPLE-XBOARD-REPLACE-ME`、`local/SAMPLE-LOCAL-REPLACE-ME` 等节点。它们只用于确认 Provider 和 selector 已加载，未提供真实代理；默认关闭示例节点的自动健康检查。保持客户端原有网关/DNS，填写真实节点并验证后再接入 LAN 客户端。
+
+默认模板已开启本机 eBPF。占位上游尚不可用时，**OpenWrt 本机命中 `proxy` / `ai` 的请求也会失败**；只想确认面板能打开时，试运行后可执行 `sbctl stop`，填好真实上游再启动。安装会启用开机启动，若暂时不希望设备重启后加载未完成的配置，可执行 `/etc/init.d/sing-box disable`，配置完成后再用 `/etc/init.d/sing-box enable` 恢复。
 
 ### 样例文件与本地引用
 
@@ -172,11 +177,19 @@ HTTP 订阅：参考 [HTTP 片段](examples/http-provider.sample.json)，将 `ex
 
 固定核心启动时先建立 selector 静态成员，再加载 Provider。保留静态默认项，在面板选择动态 Provider 节点并由缓存保存；不要把 `xboard/<节点标签>` 直接填入初始 `outbounds` 或 `default`，以免产生启动期找不到节点的错误。字段与合并方法见 [Provider 说明](providers/README.md)。
 
-配置真实上游后，在 **LAN透明网关设置** 中设置需要的 HTTP/SOCKS5 入口或 LAN 透明网关；使用 X-Tunnel 时先启动其核心，再进入 **诊断与维护 → 对齐 X-Tunnel eBPF 进程 UID**。最后预检、重启并在客户端验证。这些工具在分文件模式下会把修改写回 `inbounds.json`，后续生成配置时保留。安装或更新不会用公开起始配置或样例替换用户的节点、订阅缓存和自定义配置部分。
+配置真实上游后，在 **3 LAN透明网关设置** 中设置需要的 HTTP/SOCKS5 入口或 LAN 透明网关，随后预检、重启并在客户端验证。这些工具在分文件模式下会把修改写回 `inbounds.json`，后续生成配置时保留。安装或更新不会用公开起始配置或样例替换用户的节点、订阅缓存和自定义配置部分。
+
+使用 X-Tunnel 时，先让其核心以专用的非 root 账号运行，再进入 **6 诊断与维护 → 2 对齐 X-Tunnel eBPF 进程 UID**。工具读取实际进程 UID，不要求固定数值；若进程仍含 root UID，或 real/effective/saved/fs UID 不一致，会要求先调整运行账号，不会自动排除 UID 0。
 
 ## 5. 保留 LAN 入站与远端内网访问
 
 完整示例见 [examples/lan-private-routing.json](examples/lan-private-routing.json) 和 [填写说明](examples/README.md)。示例包含带认证的 LAN mixed 入站及“指定目的 IP/CIDR → 指定节点”路由，所有地址、账号均为文档占位内容。
+
+### 更换设备或 LAN 地址时检查哪些设置
+
+先执行 `sbctl config`，查看实际配置路径、全部监听地址和已保存的网关接口/源网段。菜单的 **配置 LAN HTTP/SOCKS5 代理** 和 **关闭 LAN HTTP/SOCKS5 入口** 只管理 `tag: "lan-mixed"`；自定义的 `lan-explicit-proxy` 等其他入站会保留。若它们仍监听旧 LAN 地址，应在 `inbounds.json`（单文件模式则是完整配置）中逐项修改相应 `listen`，再执行 `sbctl preflight && sbctl restart`。
+
+透明网关的接口和客户端源网段通过 **3 LAN透明网关设置 → 1 设置 LAN 透明网关** 单独设置。设置后还需预检和重启，再用 **2 查看网关状态** 或 `sbctl gateway status` 确认规则已激活；主菜单中的 `configured` 只表示已保存设置。修改网关设置不会自动改写其他入站的监听地址，也不要把远端私网目的路由改成新的本地 LAN 网段。
 
 ### 特色路由通过独立文件和菜单管理
 
@@ -184,29 +197,35 @@ HTTP 订阅：参考 [HTTP 片段](examples/http-provider.sample.json)，将 `ex
 
 新增时填写目的 IP/网段、可选的客户端源 IP/网段和端口，再从实际 `outbounds.json` 中的分组选择目标。至少填写源或目的 IP 范围之一。单个 IPv4 会保存为 `/32`，不依赖本机 LAN 网段。`remote-office`、`remote-home` 是用户自定义的分组 `tag`，工具按名称引用它们，没有预置的办公室、家庭地址或固定分组名称。
 
-例如，下面是追加到现有 `outbounds` 数组中的一个分组对象，其中 `office-node` 须是已经配置的静态节点：
+例如，下面是追加到现有 `outbounds` 数组中的一个分组对象，其中 `office-node` 须是已经配置的静态节点，`local` 须是已定义的 Provider：
 
 ```json
 {
   "type": "selector",
   "tag": "remote-office",
   "outbounds": ["office-node"],
-  "default": "office-node"
+  "default": "office-node",
+  "providers": ["local"]
 }
 ```
 
-分组建立后会出现在特色路由的目标列表里。规则只记录 `outbound: "remote-office"`，由核心使用该分组当前选择的节点。换节点时可以调整分组；重命名或删除仍被引用的分组时，必须同步修改路由，否则预检会拒绝启动。Provider 节点的选择方式仍遵守前文的静态初始成员要求。
+分组建立后会出现在特色路由的目标列表里。规则只记录 `outbound: "remote-office"`，由核心使用该分组当前选择的节点。`providers: ["local"]` 让这个组也能在面板选择 `local` 中的真实节点；分组不会自动继承 `proxy` 的 Provider 成员。只用静态节点时可省略 `providers`，使用其他订阅时填写其实际 Provider 标签；仍需保留静态初始成员和默认项。
+
+换节点时可以调整分组；重命名或删除仍被引用的分组时，必须同步修改路由，否则预检会拒绝启动。特色路由菜单和 `--group` 只选择 `selector`、`urltest` 或 `loadbalance` 分组。完整 LAN 示例里的 `remote-office` 是 SOCKS 静态节点，可由原生 JSON 规则直接引用；若要通过菜单管理，应在同一次 `outbounds` 编辑中将该节点改名为 `office-node`，并建立上述 `remote-office` 分组，避免保存时出现缺失引用。
 
 保存规则时先组装并预检，通过后更新源文件和完整运行 JSON。需要让运行中的服务采用这些规则时，选择特色路由中的 **校验并重启应用**；启动、重启或重载服务时也会自动读取最新源文件。编辑期间如果规则或分组发生变化，旧提交会被拒绝，以免序号变化后误改另一条规则。
 
-也可以通过 SSH 管理。下列示例要求 `remote-office` 与 `remote-home` 已经存在：
+也可以通过 SSH 管理。下列新增示例要求 `remote-office` 分组已经存在：
 
 ```sh
-sbctl routes groups
+sbctl routes groups &&
+sbctl routes add --destination 10.77.50.10 --group remote-office --port 14432 &&
 sbctl routes list
-sbctl routes add --destination 10.77.50.10 --group remote-office --port 14432
-sbctl routes edit 1 --group remote-home
-sbctl routes list
+```
+
+新增规则默认追加到末尾。需要修改时，先查看 `list` 中的实际编号，再单独执行 `sbctl routes edit N --group remote-home`，将 `N` 替换为要修改的编号，并确认 `remote-home` 分组已存在；不要把 `1` 当作刚新增规则的固定编号。确认规则无误后应用：
+
+```sh
 sbctl preflight && sbctl restart
 ```
 
@@ -222,7 +241,7 @@ sbctl preflight && sbctl restart
 | `runtime/gateway.json` 的 `interface` / `source_cidr` | 从哪个接口接管哪些 LAN 客户端 |
 | `route.rules[].ip_cidr` + `outbound` | 把哪些目的地址交给指定节点访问 |
 
-例如，希望访问 `10.77.50.10:14432` 时经过能到达远端私网的 `remote-office` 节点，先在 `outbounds.json` 定义这个节点或包含它的静态分组，再把以下内容放入 `routing.json`：
+例如，希望访问 `10.77.50.10` 和 `10.88.60.0/24` 内的目标时经过能到达远端私网的 `remote-office` 出站，先在 `outbounds.json` 定义该静态节点或分组，再添加下面的规则。**这是 `routing.json` 的结构示例；已有规则时只向 `rules` 数组追加其中的规则对象，不要覆盖整个文件或数组。** 此规则未限定端口；只匹配 `14432` 时需再添加 `"port": [14432]`。
 
 ```json
 {
@@ -277,9 +296,9 @@ sbctl preflight && sbctl restart
 更新脚本后，已有 JSON 仍是单文件模式。**配置与隐私 → 配置分文件模式 / 迁移** 可选择无损拆分，等价命令为：
 
 ```sh
-sbctl split-config
-sbctl config
-sbctl preflight
+sbctl split-config &&
+sbctl config &&
+sbctl preflight &&
 sbctl restart
 ```
 
@@ -287,11 +306,13 @@ sbctl restart
 
 生成后的完整 JSON 不作为日常编辑入口。直接改动它会触发保护，避免下一次生成时丢失手工修改。需要导入完整 JSON 时使用 `sbctl import-config FILE`，分文件模式会执行相同的兼容性检查。需要保留自由定制时，使用 **配置与隐私 → 配置分文件模式 / 迁移** 或 `sbctl single-config`，可保留有效完整 JSON、归档源目录并返回单文件模式；不自动重启。
 
+`single-config` 保留的是当时已有的完整运行 JSON，不会先应用尚未生成的源文件编辑。希望把这些编辑带入单文件配置时，先成功执行 `sbctl preflight`，再切换。
+
 通过 SSH 编辑源文件后，运行 `sbctl preflight` 组装并检查，再重启。也可以先在目录外编辑草稿，使用下面的命令校验后提交，避免把无效草稿写进当前源文件：
 
 ```sh
-sbctl config-part outbounds /tmp/my-outbounds.json
-sbctl config-part routing /tmp/my-routing.json
+sbctl config-part outbounds /tmp/my-outbounds.json &&
+sbctl config-part routing /tmp/my-routing.json &&
 sbctl restart
 ```
 
@@ -314,57 +335,67 @@ sbctl restart
 以 `sbctl config` 输出的路径和模式为准。源码配置与运行配置可以是不同文件；更新源码不会自动导入用户配置。要导入自己编辑的完整配置：
 
 ```sh
-sbctl import-config /path/to/your-config.json
-sbctl preflight
+sbctl import-config /path/to/your-config.json &&
+sbctl preflight &&
 sbctl restart
 ```
 
 导入先核心校验、备份，再替换；不自动重启。分文件模式还检查固定策略兼容性，并对重组结果执行设备预检。预检每次核对实际 IPv4 监听地址及上游 UID，不把语法缓存当成端口绑定成功。配置编辑工具保留配置符号链接。
 
-个人订阅、节点密码和下载后的 Provider 只存放在设备的运行目录。仓库将虚拟 `.sample.json` 放在 `examples/`，`providers/` 仅跟踪通用模板和说明；真实 `xboard.json`、`local.json`、默认配置分片目录及其备份被 Git 忽略。更新只补缺失的样例，不替换已有 Provider；只有真正新建运行配置时才初始化缺失的运行 Provider 文件，已有分片但生成 JSON 丢失时不会重新填入样例。不要把私人数据写回公开 `.sample.json` 或起始配置后提交，Git 忽略规则不会保护已经跟踪的文件。
+个人订阅、节点密码和下载后的 Provider 应保存在设备上的个人运行文件中。仓库将虚拟 `.sample.json` 放在 `examples/`，`providers/` 仅跟踪通用模板和说明；真实 `xboard.json`、`local.json`、默认配置分片目录及其备份被 Git 忽略。更新只补缺失的样例，不替换已有 Provider；只有真正新建运行配置时才初始化缺失的运行 Provider 文件，已有分片但生成 JSON 丢失时不会重新填入样例。不要把私人数据写回公开 `.sample.json` 或起始配置后提交，Git 忽略规则不会保护已经跟踪的文件。
 
 ## 7. 在线更新
 
 ### SSH 菜单
 
-运行 `sb` → **安装与更新 → 更新公开仓库源码** → 离线文件路径处直接回车，即按当前代理设置下载公开 `main` 分支。也可填写已上传的 ZIP/TAR.GZ。
+运行 `sb` → **5 安装与更新 → 2 更新公开仓库源码**：
 
-更新源码后，在实际源码目录部署配套脚本：
+- **通过引导脚本/压缩包准备的源码目录：** 在离线文件路径处直接回车，按当前代理设置下载公开仓库 `main` 分支；也可填写已上传的 ZIP/TAR.GZ。
+- **Git 工作树：** 检查无未提交变更且当前分支为 `main` 或 `openwrt` 后，从当前配置的远程执行 `git pull --ff-only`。此模式不提示压缩包路径，也不会自动换成公开仓库；GitHub 下载前缀不能代理 `git pull`，请使用默认网络或 HTTP 代理。
+
+源码更新完成后，记下输出的 `源码更新完成：...` 目录，退出当前菜单。将下面的 `/实际的源码目录` 替换为该绝对路径，再部署配套脚本。**此步骤用于已经完成安装的设备；首次安装中断请按下一节恢复。**
 
 ```sh
-cd /overlay/openwrt-singbox-ebpf
-bash install.sh --scripts-only
-sbctl config
-sbctl preflight
+cd '/实际的源码目录' &&
+bash ./install.sh --scripts-only &&
+sbctl config &&
+sbctl preflight &&
 sbctl restart
 ```
 
-目录不同请替换 `cd` 路径。`--scripts-only` 会先检查并备份，再更新脚本、菜单、procd 文件及配套模板；保留用户分片、运行 JSON、Provider、核心和网关设置，不联网、不生成配置、不自动重启。分文件模式下，新模板中的 DNS/基础路由策略在下一次预检或启动时组装，通过校验后才写入生成 JSON；单文件模式不会自动改变 DNS/路由。
+`/overlay/openwrt-singbox-ebpf` 只是默认源码目录；这里应使用菜单显示的实际目录。`&&` 确保进入目录、部署或预检失败时不会继续执行后续步骤。`--scripts-only` 本身会先检查并备份，再更新脚本、菜单、procd 文件及配套模板；保留用户分片、运行 JSON、Provider、核心和网关设置，不联网、不生成配置、不自动重启。上面最后一条命令才重启服务。部署后重新运行 `sb`，以加载新菜单。
+
+分文件模式下，新模板中的 DNS/基础路由策略在下一次预检或启动时组装，通过校验后才写入生成 JSON；单文件模式不会自动改变 DNS/路由。
 
 ### 安装在配置初始化阶段中断后的恢复
 
 旧版从源码菜单安装时，可能出现 `Missing configuration-parts tool: .../scripts/config-parts.sh`：菜单传入了源码目录的工具路径，安装器又把没有执行位误判为文件缺失。新版安装器使用实际服务目录中的可读工具，并交给 Bash 执行。
 
-如果已经遇到这个错误，先通过 **安装与更新 → 更新公开仓库源码** 更新，退出旧菜单，再进入更新完成后显示的实际源码目录执行：
+如果已经遇到这个错误，先通过 **安装与更新 → 更新公开仓库源码** 更新，退出旧菜单。将下面的占位路径替换为更新完成后显示的实际源码目录，再执行：
 
 ```sh
-bash ./install.sh
+cd '/实际的源码目录' &&
+bash ./install.sh &&
 sbctl config
 ```
 
-这会补齐此前可能尚未完成的 CLI 和 procd 注册。中断前生成的完整 JSON、Provider 和用户配置会保留；重跑安装不会擅自迁移已有单文件配置。如果 `sbctl config` 显示为单文件模式，可执行 `sbctl split-config`，或进入 **配置与隐私 → 配置分文件模式 / 迁移 → 将兼容的单文件配置无损拆分**。迁移校验通过后才生成分片；不兼容的自定义 DNS 或规则顺序会保留原配置并提示原因。
+这会补齐此前可能尚未完成的 CLI 和 procd 注册；`--scripts-only` 要求这些安装内容已经存在，不能代替本次完整修复。中断前生成的完整 JSON、Provider 和用户配置会保留；重跑安装不会擅自迁移已有单文件配置。如果 `sbctl config` 显示为单文件模式，可执行 `sbctl split-config`，或进入 **配置与隐私 → 配置分文件模式 / 迁移 → 将兼容的单文件配置无损拆分**。迁移校验通过后才生成分片；不兼容的自定义 DNS 或规则顺序会保留原配置并提示原因。
 
 ### 一次完成源码与脚本更新
 
+适用于非 Git 源码目录和已经完成的服务安装。先退出旧菜单，并将占位路径替换为实际源码目录：
+
 ```sh
-cd /overlay/openwrt-singbox-ebpf
+cd '/实际的源码目录' &&
 SB_INSTALL_SOURCE_DIR="$PWD" sh ./quick-install.sh --update --no-menu &&
 bash ./install.sh --scripts-only
 ```
 
-需要本次临时代理时，为引导命令添加 `--http-proxy URL` 或 `--github-proxy PREFIX`。Git 工作树不会被压缩包覆盖；使用菜单的干净工作树检查和 `git pull --ff-only` 流程。
+这组命令不重启服务；完成后重新打开 `sb`，需要应用时执行 `sbctl preflight && sbctl restart`。需要本次临时代理时，为引导命令添加 `--http-proxy URL` 或 `--github-proxy PREFIX`。Git 工作树不会被压缩包覆盖；使用菜单的干净工作树检查和 `git pull --ff-only` 流程。
 
-**安装与更新 → 更新 reF1nd 内核** 单独更新核心：先下载并验证版本校验值，用候选核心检查现有配置后才替换；正在运行时重启失败会恢复旧二进制并尝试恢复服务。分文件模式先检查当前源文件与生成 JSON 是否一致；存在尚未应用的编辑、新模板策略或生成 JSON 缺失时，请先用当前核心执行 `sbctl preflight`，确认配置后再更新核心。候选核心验证期间也会检查源文件是否变化，避免校验一份配置却运行另一份。
+**5 安装与更新 → 5 更新 reF1nd 内核** 单独更新核心，默认使用项目固定版本（当前为 `v1.15.0-alpha.11-reF1nd`），不是自动追踪 GitHub latest。明确要用其他发行版本时，可执行 `sbctl update-core RELEASE_TAG`，把 `RELEASE_TAG` 替换为目标版本；指定版本也必须能取得并通过对应校验值验证。
+
+核心更新先下载并验证校验值，用候选核心检查现有配置后才替换；正在运行时重启失败会恢复旧二进制并尝试恢复服务。分文件模式先检查当前源文件与生成 JSON 是否一致；存在尚未应用的编辑、新模板策略或生成 JSON 缺失时，请先用当前核心执行 `sbctl preflight`，确认配置后再更新核心。候选核心验证期间也会检查源文件是否变化，避免校验一份配置却运行另一份。
 
 ## 8. 常用菜单和诊断
 

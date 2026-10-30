@@ -26,7 +26,7 @@
 
 只读命令为 `sbctl routes list` 和 `sbctl routes groups`；例如 `sbctl routes add --destination 10.77.50.10 --group remote-office --port 14432` 会把单个 IPv4 转成 `/32`。`edit N` 修改指定规则，`remove N` 删除，`move FROM TO` 调整优先级；序号从 1 开始。菜单与命令只修改相应路由，不清空其他规则或重建出站节点。分组更名时要同步修改引用；无效引用可直接在路由管理中修复，不需要先启动坏配置。
 
-在 `outbounds.json` 定义自己的静态 `remote-office` 出站，然后把以下内容写入设备上的 `routing.json`。地址均为虚构示例，需替换为实际目标：
+在 `outbounds.json` 定义自己的静态 `remote-office` 出站或分组，再向设备上的 `routing.json` 添加规则。下面是文件结构样例；已有规则时只追加其中的规则对象，不要覆盖整个 `rules` 数组。地址均为虚构示例，需替换为实际目标；未填写 `port` 表示不限定端口：
 
 ```json
 {
@@ -42,7 +42,9 @@
 }
 ```
 
-规则按用户填写的次序插在固定 DNS 劫持、协议识别、STUN/DTLS 拒绝三条规则之后，在其他固定路由和通用私网直连规则之前。引用的出站必须存在，且远端出口实际能够访问目标网络；不要把动态 Provider 节点标签直接当作尚未加载的静态出站。需要从 Provider 中选择时，可以建立具有安全静态初始成员的命名选择组，再由面板选择真实节点。
+规则按用户填写的次序插在固定 DNS 劫持、协议识别、STUN/DTLS 拒绝三条规则之后，在其他固定路由和通用私网直连规则之前。引用的出站必须存在，且远端出口实际能够访问目标网络；不要把动态 Provider 节点标签直接当作尚未加载的静态出站。需要从 Provider 中选择时，建立具有可用静态初始成员的命名选择组，并在该组显式填写 `providers`（例如 `["local"]`），再由面板选择真实节点；各组不会自动继承 `proxy` 的 Provider 成员。
+
+菜单和 `sbctl routes ... --group` 的目标必须是 `selector`、`urltest` 或 `loadbalance` 分组；原生 JSON 规则还可以直接引用静态节点。完整 `lan-private-routing.json` 中的 `remote-office` 是 SOCKS 节点，要让它出现在菜单分组列表中，可在同一次 `outbounds` 编辑中把节点改名为 `office-node`，并新增名为 `remote-office`、以 `office-node` 为静态初始成员的 selector，避免保存时出现缺失引用。分组格式见 [主教程](../README.md#特色路由通过独立文件和菜单管理)。
 
 目的 CIDR 规则只决定业务连接的出站，不会自动添加企业内网 DNS。需要自定义解析器或仅按域名匹配的 DNS/路由策略时，第一版分片模式无法无损表达，应保留单文件配置。
 
@@ -85,15 +87,15 @@
 把编辑后的文件保存到设备上的个人路径，然后运行：
 
 ```sh
-sbctl import-config /path/to/your-config.json
-sbctl config
-sbctl preflight
+sbctl import-config /path/to/your-config.json &&
+sbctl config &&
+sbctl preflight &&
 sbctl restart
 ```
 
-导入会校验并备份现有配置，不自动重启。单文件模式的内核校验不等于实际监听检查；分片模式还要求固定策略兼容，并对重组结果执行预检后回写源文件。请先修改文档地址：分片导入、后续预检或启动会拒绝未分配给本机的监听地址。
+导入会校验并备份现有配置，不自动重启；上述 `&&` 保证导入或预检失败后不会继续重启。单文件和分片导入都会检查非回环、非通配的 IPv4 监听地址是否属于本机；分片模式还要求固定策略兼容，并对重组结果执行完整预检后回写源文件。请先修改文档地址，两种模式都会拒绝未分配给本机的示例 IPv4。
 
-透明 LAN 网关的接口和源网段需要单独通过 `sb` 菜单设置。修改 `mixed.listen` 不会自动改变网关源网段，也不等于已经接管 LAN 客户端的 IPv6 或 DNS。
+透明 LAN 网关的接口和源网段需要单独通过 `sb` 菜单设置。HTTP/SOCKS5 菜单只管理 `tag: "lan-mixed"`，自定义 `lan-explicit-proxy` 等其他入站的 `listen` 需自行检查。修改 `mixed.listen` 不会自动改变网关源网段，也不等于已经接管 LAN 客户端的 IPv6 或 DNS。
 
 ## HTTP 订阅片段
 
